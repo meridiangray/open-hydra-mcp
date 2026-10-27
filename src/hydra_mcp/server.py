@@ -148,11 +148,13 @@ def link_image(image: str, kind: str, schema: str | None = None, position: str |
 
 
 @mcp.tool()
-def create_archive(path: str, name: str | None = None, confirm: bool = False) -> dict:
+def create_archive(path: str, name: str | None = None, prefix: str | None = None, confirm: bool = False) -> dict:
     """Start a new, empty hydra archive in a new or empty folder (full path, chosen
-    by the person). Without confirm it only shows what it would create; call again
-    with confirm=true once the person agrees. Then pass the folder as `archive`."""
-    return _run(lambda: core.create_archive(path, name, None, confirm))
+    by the person). `prefix` is the id prefix every collection uses (default: one
+    made from the name; "none" gives each collection its own). Without confirm it
+    only shows what it would create; call again with confirm=true once the person
+    agrees. Then pass the folder as `archive`."""
+    return _run(lambda: core.create_archive(path, name, prefix, confirm))
 
 
 def main() -> None:

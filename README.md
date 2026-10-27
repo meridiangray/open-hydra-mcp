@@ -13,11 +13,12 @@ Each call to `save` adds one new collection and nothing else:
 ```
 collections/<collection>.json                 the records
 .hydra/sources/entries/<collection>.json      the raw text, as one Document (an Article when it has a URL)
+.hydra/sources/files/<collection>/<file>      the original file, when the source is one
 ```
 
 Every entity (person, organization, company…) cites that document in `sources`, so `hydra-ctl claims` and `hydra-ctl sources` trace each value back to the text. Relationships have no `sources` field in FtM: they trace back through their collection, which holds that one source only.
 
-The archive is rebuilt after writing, and the result reports the new review questions. A batch with errors is never written, an existing collection is never overwritten unless asked, and a build that fails puts the files back as they were. To undo an ingestion, delete its two files and run `hydra-ctl build`.
+The archive is rebuilt after writing, and the result reports the new review questions. A batch with errors is never written, an existing collection is never overwritten unless asked, and a build that fails puts the files back as they were. To undo a save, delete the files listed in its `undo` result, then run `hydra-ctl build`.
 
 ## Tools
 
@@ -125,6 +126,20 @@ claude mcp add hydra --env HYDRA_ARCHIVE=/path/to/case -- hydra-mcp
 
 If the client can't find the command, give its full path (`which hydra-mcp` or `where hydra-mcp` prints it).
 
+**Windows:** give the full path and double every backslash:
+
+```json
+"command": "C:\\Users\\you\\.local\\bin\\hydra-mcp.exe",
+"env": {"HYDRA_ARCHIVE": "C:\\cases\\case"}
+```
+
+**Installed in WSL, client on Windows:**
+
+```json
+"command": "wsl",
+"args": ["-d", "Debian", "--", "bash", "-lc", "HYDRA_ARCHIVE=/mnt/c/cases/case hydra-mcp"]
+```
+
 ## Running it
 
 The archive is each tool's `archive` argument, else `HYDRA_ARCHIVE`, else an archive activated (`hydra-ctl activate`) in the folder the server starts in or above it, else that folder if it is an archive.
@@ -143,7 +158,10 @@ An archive that is named but isn't one (a wrong path) is an error, never a quiet
 ## Tests
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install pytest "mcp>=1.2,<2" -e ../open-hydra -e .
+git clone https://github.com/meridiangray/open-hydra
+git clone https://github.com/meridiangray/open-hydra-mcp
+cd open-hydra-mcp
+python3 -m venv .venv && .venv/bin/pip install pytest -e ../open-hydra -e .
 .venv/bin/python -m pytest -q
 ```
 

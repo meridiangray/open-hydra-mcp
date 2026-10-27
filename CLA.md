@@ -22,4 +22,4 @@ By submitting a contribution (code, documentation, data files, comments or anyth
 
 ## How to sign
 
-Open a pull request. The CLA bot comments with a link; agreeing there records your name, account and the date. Keep a copy of the record: it is the evidence that you agreed.
+In your pull request description, write: "I have read the Contributor Agreement and agree to it." That comment, with your account and its date, is the record that you agreed.
