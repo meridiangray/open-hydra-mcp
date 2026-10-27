@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-hydra-mcp"
+version = "0.1.0"
+description = "An MCP server that turns files and raw text into records a hydra archive accepts"
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Meridian Gray", email = "gray.crested645@passfwd.com" }]
+requires-python = ">=3.11"
+# open-hydra is not on PyPI: install it from https://github.com/meridiangray/open-hydra alongside this (see README)
+# pypdf capped below 6.21 (released Oct 2026, newer than a week when added); raise after vetting
+dependencies = ["mcp>=1.2,<2", "open-hydra", "PyYAML>=6", "pypdf>=6.20.1,<6.21", "python-docx>=1.1,<2"]
+
+[project.urls]
+Homepage = "https://github.com/meridiangray/open-hydra-mcp"
+Source = "https://github.com/meridiangray/open-hydra-mcp"
+Issues = "https://github.com/meridiangray/open-hydra-mcp/issues"
+
+[project.scripts]
+hydra-mcp = "hydra_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

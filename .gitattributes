@@ -1,0 +1,11 @@
+# Line endings are LF everywhere, on every OS. The schema manifest hashes bytes and the docs examples
+# are compared byte for byte, so a CRLF checkout on Windows would break both.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.docx binary
+*.hydra binary
