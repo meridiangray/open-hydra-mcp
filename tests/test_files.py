@@ -6,7 +6,7 @@ import json
 import pytest
 
 from hydra import layout
-from hydra_mcp import core, server
+from hydra_mcp import core, mint, server
 
 TEXT = "Dana Hale, administrator of the Port Authority, said her deputy Rob Kerr would lead the inquiry."
 RECORDS = [{"schema": "PublicBody", "properties": {"name": "Port Authority"}},
@@ -102,7 +102,9 @@ def test_a_file_is_saved_as_the_evidence_with_its_original_and_exact_text(archiv
     assert (archive / out["evidence"]).read_bytes() == content
     recs = json.loads((archive / "collections/filing.json").read_text())          # plain hydra JSON
     assert all(set(r) == {"id", "schema", "properties"} for r in recs)
-    assert all(r["properties"]["sources"] == ["filing-source"] for r in recs if r["schema"] != "Employment")
+    sid = json.loads((archive / ".hydra/sources/entries/filing.json").read_text())[0]["id"]
+    assert sid == mint.document_id(hashlib.sha1(content).hexdigest())
+    assert all(r["properties"]["sources"] == [sid] for r in recs if r["schema"] != "Employment")
     doc = json.loads((archive / ".hydra/sources/entries/filing.json").read_text())[0]["properties"]
     assert doc["title"] == ["filing"] and doc["fileName"] == ["filing.pdf"] and doc["mimeType"] == ["application/pdf"]
     assert doc["contentHash"] == [hashlib.sha1(content).hexdigest()]          # the file itself
@@ -112,9 +114,9 @@ def test_a_file_is_saved_as_the_evidence_with_its_original_and_exact_text(archiv
     assert doc["processingAgent"] == [f"hydra-mcp files.read (pypdf {pypdf.__version__})"]
     assert doc["notes"] == [f"sha1 of the text extracted from this file: {text_sha1}"]
     assert doc["publisher"] == ["Acme Times"]
-    assert {c["value"] for c in claims(archive) if c["prop"] == "sources"} == {"case:filing-source"}
-    assert server.read_file(str(f), archive=str(archive))["already_in_archive"]["source"] == "filing-source"
-    with pytest.raises(ValueError, match="already saved as evidence 'filing-source'.*\"id\""):
+    assert {c["value"] for c in claims(archive) if c["prop"] == "sources"} == {"case:" + sid}
+    assert server.read_file(str(f), archive=str(archive))["already_in_archive"]["source"] == sid
+    with pytest.raises(ValueError, match="already saved as evidence '" + sid + "'.*\"id\""):
         server.save(RECORDS[:1], {"file": str(f)}, archive=str(archive))
 
 
@@ -142,8 +144,9 @@ def test_entities_already_in_the_archive_cite_the_new_evidence(archive, tmp_path
 def test_more_records_can_cite_evidence_already_saved(archive, tmp_path):
     (tmp_path / "a.txt").write_text(TEXT)
     server.save(RECORDS[:3], {"file": str(tmp_path / "a.txt")}, "a", archive=str(archive))
-    out = server.save([RECORDS[4], RECORDS[2], RECORDS[0]], {"id": "case:a-source"}, "a-more", archive=str(archive))
-    assert out["saved"] and out["files"] == ["collections/a-more.json"] and out["source_id"] == "a-source"
+    sid_a = json.loads((archive / ".hydra/sources/entries/a.json").read_text())[0]["id"]
+    out = server.save([RECORDS[4], RECORDS[2], RECORDS[0]], {"id": "case:" + sid_a}, "a-more", archive=str(archive))
+    assert out["saved"] and out["files"] == ["collections/a-more.json"] and out["source_id"] == sid_a
     with pytest.raises(ValueError, match="no source 'nope'"):
         server.save(RECORDS[:1], {"id": "nope"}, archive=str(archive))
 

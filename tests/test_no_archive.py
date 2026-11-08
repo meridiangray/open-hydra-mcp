@@ -5,7 +5,7 @@ import json
 import pytest
 
 from hydra import layout, resources
-from hydra_mcp import core, server
+from hydra_mcp import core, mint, server
 
 RECORDS = [{"schema": "Person", "properties": {"name": "Dana Hale"}},
            {"schema": "PublicBody", "properties": {"name": "Port Authority"}},
@@ -61,8 +61,8 @@ def test_create_archive_previews_then_creates_and_the_text_can_go_in(nowhere):
                            archive=out["archive"])
     assert got["saved"] and "Rebuilt" in got["build"]
     ids = [r["id"] for r in json.loads((dest / "collections/first.json").read_text())]
-    assert ids[0] == "person-dana-hale"
-    assert server.find_entities("Dana Hale", archive=out["archive"])[0]["id"] == "port-inquiry:person-dana-hale"
+    assert mint.is_minted(ids[0]) and ids[0].startswith("per-")
+    assert server.find_entities("Dana Hale", archive=out["archive"])[0]["id"] == "port-inquiry:" + ids[0]
 
 
 def test_create_archive_refuses_a_folder_with_files(nowhere):

@@ -21,6 +21,7 @@ rebuild to undo it. A later ingestion can cite an earlier source by its id
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,9 +30,13 @@ from pathlib import Path
 
 import yaml
 
-from hydra import build, dates, layout, resources, schema
+from hydra import build, dates, history, layout, resources, schema, standards, vocab
+from hydra import ingest as hingest
+from hydra import keys as hkeys
 from hydra.identity import types
 from hydra.shape import rules
+
+from hydra_mcp import mint
 
 NAME_PROPS = ("name", "alias", "weakAlias", "previousName")
 IMAGE_FIELDS = ("thumb", "portrait", "logo", "badge", "icon")
@@ -115,7 +120,7 @@ def create_archive(path: str, name: str | None = None, prefix: str | None = None
     prefix = "" if prefix == "none" else prefix or default_prefix(name)
     out = {"created": False, "path": str(p), "folder": "empty" if p.is_dir() else "new", "name": name,
            "prefix": prefix or None,
-           "ids": f"records get ids like {prefix}:person-dana-hale" if prefix else
+           "ids": f"records get ids like {prefix}:per-w3v2f7z7pe" if prefix else
                   "each collection gets its own prefix, made from its name"}
     if not confirm:
         return {**out, "next": "confirm the folder, name and prefix with the person, then call again with confirm=true"}
@@ -253,6 +258,19 @@ def get_records(root: Path, collection: str | None = None, name: str | None = No
                                   "properties": {p: v for p, v in (r.get("properties") or {}).items() if p != "sources"}}
                                  for r in stored], collection)
     existing = _existing_names(root)
+    nodes = resources.declared_nodes(root)
+    by_ref = {rid: nid for nid, n in nodes.items() for rid in (nid, *(n.get("referents") or ()))}
+
+    def resolves(v: str):
+        """A link value -> the entities it resolves to: by id (as written, or with its
+        collection's prefix, which the build adds) or else by name."""
+        nid = by_ref.get(v) or next((by_ref[k] for k in by_ref if k.endswith(":" + v)), None)
+        if nid:
+            n = nodes[nid]
+            return [{"id": nid, "name": n.get("caption"), "schema": n.get("schema")}]
+        return [{"id": h["id"], "name": h["caption"], "schema": h["schema"]}
+                for h in existing.get(types.norm_text(v), [])[:3]] or None
+
     want = types.norm_text(name) if name else None
     rows = []
     for r in stored:
@@ -264,9 +282,7 @@ def get_records(root: Path, collection: str | None = None, name: str | None = No
         for p, vs in props.items():
             t = (defs.get(p) or {}).get("type", "unknown property")
             if t == "entity" and p != "sources":
-                shown[p] = {"type": t, "values": [{"value": v, "resolves_to": [
-                    {"id": h["id"], "name": h["caption"], "schema": h["schema"]}
-                    for h in existing.get(types.norm_text(v), [])[:3]] or None} for v in vs]}
+                shown[p] = {"type": t, "values": [{"value": v, "resolves_to": resolves(v)} for v in vs]}
             else:
                 shown[p] = {"type": t, "values": vs}
         rows.append({"id": r.get("id"), "schema": sname, "properties": shown})
@@ -281,11 +297,12 @@ def get_records(root: Path, collection: str | None = None, name: str | None = No
 
 
 def _load_records(f: Path) -> list[dict]:
+    """A collection or source-entry file's records as written: a JSON array (as `save`
+    writes it) or one record per line (as `import` does); [] when it does not parse."""
     try:
-        data = json.loads(f.read_text(encoding="utf-8"))
+        return hingest.raw_records(f.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return []
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
 
 
 # ---- images ------------------------------------------------------------------------------
@@ -347,6 +364,57 @@ def _existing_names(root: Path) -> dict[str, list[dict]]:
     return out
 
 
+FACT_PROPS = ("birthDate", "deathDate", "nationality", "country", "position", "gender", "jurisdiction",
+              "incorporationDate", "organization")
+
+
+def _canon_row(root: Path, node_id: str) -> dict | None:
+    """A node's row in the last universe build: its H (with state and flags), its keys..."""
+    from hydra.universe import layer
+    if not layer.is_universe(root):
+        return None
+    node = resources.declared_nodes(root).get(node_id) or {}
+    ids = {node_id, *(node.get("referents") or ())}
+    for row in layer.read_parsed(root, "canon.jsonl", missing=[]):
+        if not row.get("redirect") and any(m.split("/", 1)[1] in ids for m in row.get("members") or []
+                                           if m.startswith(layer.SELF + "/")):
+            return row
+    return None
+
+
+def _h_of(root: Path, node_id: str) -> str | None:
+    """The canonical id (H) of a node, with its state and flags, from the last universe build."""
+    return (_canon_row(root, node_id) or {}).get("h")
+
+
+def _keyed(root: Path) -> dict[str, dict]:
+    """`ns:key` (as compared) -> the canon row of the entity holding it, from the last universe build."""
+    from hydra.universe import layer
+    if not layer.is_universe(root):
+        return {}
+    return {k: row for row in layer.read_parsed(root, "canon.jsonl", missing=[])
+            if not row.get("redirect") for k in row.get("keys") or ()}
+
+
+def _facts(root: Path, node_id: str) -> dict:
+    """What tells an existing entity apart from its namesakes: its H, dates, nationality,
+    the posts it holds and its parents, as the last build has them."""
+    n = resources.declared_nodes(root).get(node_id) or {}
+    props = n.get("props") or {}
+    facts = {p: props[p] for p in FACT_PROPS if props.get(p)}
+    rels = [f"{r.get('relationship') or r.get('label') or ''}: {r.get('cap') or r.get('at')}".strip(": ")
+            for r in n.get("rels") or []][:6]
+    out = {"facts": facts, **({"links": rels} if rels else {})}
+    row = _canon_row(root, node_id) or {}
+    return {**out, **({"h": row["h"]} if row.get("h") else {}), **({"keys": row["keys"]} if row.get("keys") else {})}
+
+
+def _facts_of_batch(recs: list[dict], rid: str) -> dict:
+    r = next((x for x in recs if x["id"] == rid), {"properties": {}, "schema": ""})
+    return {"caption": (r["properties"].get("name") or [rid])[0], "schema": r["schema"],
+            "facts": {p: r["properties"][p] for p in FACT_PROPS if r["properties"].get(p)}}
+
+
 def _ids_in(root: Path, skip: str | None = None) -> dict[str, str]:
     """id -> the collection (or source entry) file holding it, as the files write them."""
     files, entries = resources.record_files(root)
@@ -354,20 +422,16 @@ def _ids_in(root: Path, skip: str | None = None) -> dict[str, str]:
     for f in files + entries:
         if f.stem == skip:
             continue
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            continue
-        for r in data if isinstance(data, list) else []:
-            if isinstance(r, dict) and r.get("id"):
-                out.setdefault(str(r["id"]), f.relative_to(root).as_posix())
+        for r in _load_records(f):
+            out.setdefault(str(r["id"]), f.relative_to(root).as_posix())
     return out
 
 
 def normalize(records: list[dict], taken_ids=()) -> list[dict]:
     """Records as hydra writes them: `{id, schema, properties: {prop: [str]}}`, with
-    a readable id made from the schema and name when none is given, never one the
-    archive already uses (`taken_ids`)."""
+    a minted id (`per-` and ten random characters, see mint.py) when none is given,
+    never one the archive already uses (`taken_ids`). A schema that cannot be minted
+    (unknown, abstract, no code) gets a placeholder; `check_records` reports the schema."""
     out, taken = [], set(taken_ids)
     for r in records or []:
         if not isinstance(r, dict):
@@ -376,20 +440,55 @@ def normalize(records: list[dict], taken_ids=()) -> list[dict]:
         props = {p: v for p, v in props.items() if v}
         rid = str(r.get("id") or "").strip()
         if not rid:
-            label = (props.get("name") or props.get("role") or [r.get("schema") or "record"])[0]
-            base = f"{_slug(str(r.get('schema') or 'record'))}-{_slug(label)}"
-            rid, k = base, 2
-            while rid in taken:
-                rid, k = f"{base}-{k}", k + 1
+            try:
+                rid = mint.mint_id(str(r.get("schema") or "").strip(), taken)
+            except mint.MintError:
+                rid = f"unmintable_{len(out) + 1}"
         taken.add(rid)
-        out.append({"id": rid, "schema": str(r.get("schema") or "").strip(), "properties": props})
+        rec = {"id": rid, "schema": str(r.get("schema") or "").strip(), "properties": props}
+        if isinstance(r.get("_meta"), dict) and r["_meta"]:     # a saved record's qualifiers (`approx`) stay
+            rec["_meta"] = json.loads(json.dumps(r["_meta"]))
+        out.append(rec)
     return out
 
 
-def check_records(root: Path, records: list[dict], collection: str | None = None) -> dict:
+def storable(records: list[dict]) -> list[dict]:
+    """Records as a collection file keeps them: `_meta.cites` only served the quote check."""
+    for r in records:
+        meta = r.get("_meta") or {}
+        meta.pop("cites", None)
+        if "_meta" in r and not meta:
+            r.pop("_meta")
+    return records
+
+
+def _batch_source_text(root: Path, source: dict | None) -> str | None:
+    """The text of the source a batch is saved with (a file, a text, a kept source's id)."""
+    if not source:
+        return None
+    if source.get("id"):
+        from hydra_mcp import sources as src
+        return src.text_of(root, source["id"])
+    if source.get("file"):
+        from hydra_mcp import files
+        return files.read(resolve_file(root, source["file"]))["text"]
+    return str(source.get("text") or "") or None
+
+
+def check_records(root: Path, records: list[dict], collection: str | None = None, link_by: str = "id",
+                  source: dict | None = None) -> dict:
     """Everything wrong or worth knowing about a proposed batch, without writing.
     `errors` block an ingestion; `warnings` and the rest are for the reader.
-    `collection`: the one being replaced, whose ids are free to reuse."""
+    `collection`: the one being replaced, whose ids are free to reuse.
+    `link_by="id"` (the default): a link written as a name that names exactly one
+    record (in this batch or the archive) is written as that record's id, so it
+    can never land on a namesake later; a name that names several is kept and
+    listed in `ambiguous_links` with each candidate's distinguishing facts, for the
+    model to answer with an id. `link_by="name"` keeps every link as written.
+    A link must name the kind of entity its field takes (an Event's `involved` a
+    legal entity, an Ownership's `asset` an asset). A record's `notes` must be in
+    the text of its sources, word for word: the batch's `source` and the kept
+    sources the record cites in `sources` (`fetch_source` keeps one)."""
     used = _ids_in(root, skip=collection)
     recs = normalize(records, used)
     errors, warnings = [], []
@@ -399,21 +498,55 @@ def check_records(root: Path, records: list[dict], collection: str | None = None
     ids = [r["id"] for r in recs]
     for rid in sorted({i for i in ids if ids.count(i) > 1}):
         errors.append(f"{rid}: two records have this id")
+    batch_ids = set(ids)
     in_batch: dict[str, str] = {}                                  # normalized name or id -> record id
+    batch_names: dict[str, set] = {}                               # normalized name -> every record carrying it
     for r in recs:
         in_batch[types.norm_text(r["id"])] = r["id"]
         for p in NAME_PROPS:
             for v in r["properties"].get(p) or []:
                 in_batch.setdefault(types.norm_text(v), r["id"])
+                batch_names.setdefault(types.norm_text(v), set()).add(r["id"])
+    ambiguous = []
     existing = _existing_names(root)
+    existing_ids = set(resources.declared_nodes(root)) | set(used)
     off = resources.defaults_off(root)
     compiled = rules.compile_rules(None if "generic" in off else _yaml(root / layout.DEFAULT_POSITIONS) or None,
                                    None if "hierarchy" in off else _yaml(root / layout.POSITIONS) or None)
     positions = compiled["positions"]
+    vocabs = vocab.load(root)
+    keyconf, keyed, keyed_out = hkeys.load(root), _keyed(root), []
+    std = standards.load(root)
+    from hydra_mcp import sources as src
+    batch_text = _batch_source_text(root, source)
+    kept_text: dict[str, str | None] = {}
+    nodes = resources.declared_nodes(root)
+    schema_of_id = {i: n.get("schema") for i, n in nodes.items()}
+    schema_of_id.update({ref: n.get("schema") for n in nodes.values() for ref in n.get("referents") or ()})
+    batch_schema = {r["id"]: r["schema"] for r in recs}
+
+    def fits(target: str | None, rng: str | None) -> bool:
+        return not (rng and target and target in schema.SCHEMA and rng in schema.SCHEMA) or schema.is_a(target, rng)
     links, roles, duplicates, cited, cite = [], [], [], [], {}
 
     for r in recs:
         rid, sname, props = r["id"], r["schema"], r["properties"]
+        if sname in schema.SCHEMA and props.get("sources") and "sources" not in schema.resolve(sname)["props"]:
+            # a relationship (Ownership, Family...) has no `sources` in FtM: it cites a kept source by its URL,
+            # and the source still checks its notes
+            cite_ids, urls = list(props.pop("sources")), []
+            for sid in cite_ids:
+                try:
+                    u = (_existing_source(root, sid).get("properties") or {}).get("sourceUrl") or []
+                except IngestError:
+                    errors.append(f"{rid}.sources: '{sid}' is no source in the archive")
+                    continue
+                if not u:
+                    errors.append(f"{rid}.sources: '{sid}' has no URL, and a {sname} cites by URL; give the batch "
+                                  "`source` instead")
+                urls += u
+            props["sourceUrl"] = list(dict.fromkeys((props.get("sourceUrl") or []) + urls))
+            r.setdefault("_meta", {})["cites"] = cite_ids
         if not VALID_NAME.match(rid):
             errors.append(f"{rid}: an id may hold letters, digits, - and _ only")
         if sname not in schema.SCHEMA:
@@ -429,8 +562,18 @@ def check_records(root: Path, records: list[dict], collection: str | None = None
             elif p not in pdefs and p != "proof":
                 errors.append(f"{rid}.{p}: {sname} has no property '{p}'")
             elif (pdefs.get(p) or {}).get("type") == "date":
-                errors += [f"{rid}.{p}: '{v}' is not a date (YYYY, YYYY-MM or YYYY-MM-DD)"
-                           for v in vals if dates.bounds(v) is None]
+                fixed = []
+                for v in vals:                # "c. 1748", "before 1800", "1950s": the date, its qualifier kept
+                    d, kind = dates.exact(v)
+                    if d is None:
+                        errors.append(f"{rid}.{p}: '{v}' is not a date (YYYY, YYYY-MM or YYYY-MM-DD; "
+                                      "or c. YYYY, before YYYY, after YYYY, YYYYs, YYYY?)")
+                        fixed.append(v)
+                        continue
+                    fixed.append(d)
+                    if kind:
+                        r.setdefault("_meta", {}).setdefault("approx", {})[p] = kind
+                props[p] = fixed
         if edge:
             for end in (edge["source"], edge["target"]):
                 if not props.get(end):
@@ -442,22 +585,52 @@ def check_records(root: Path, records: list[dict], collection: str | None = None
             d = pdefs.get(p) or {}
             if d.get("type") != "entity" or p in ("sources", "proof"):
                 continue
+            out_vals = []
+            rng = d.get("range")
+
+            def wrong_kind(v, target_schema):
+                """A link to the wrong kind of entity: an estate in a deal's `involved`, a person as an asset."""
+                if not fits(target_schema, rng):
+                    hint = (" (an asset reaches its deal through its Ownership's `transaction`)"
+                            if p in ("involved", "organizer") and schema.is_a(target_schema, "Asset") else "")
+                    an = lambda w: ("an " if w[:1] in "AEIOU" else "a ") + w
+                    errors.append(f"{rid}.{p}: '{v}' is {an(target_schema)}; `{p}` takes {an(rng)}{hint}")
             for v in vals:
                 k = types.norm_text(v)
-                if k in in_batch:
-                    links.append({"record": rid, "field": p, "value": v, "links_to": f"this batch: {in_batch[k]}"})
-                elif k in existing:
-                    hits = existing[k]
-                    links.append({"record": rid, "field": p, "value": v,
-                                  "links_to": ", ".join(f"{h['caption']} ({h['id']})" for h in hits[:3])})
-                    if len(hits) > 1:
-                        warnings.append(f"{rid}.{p}: '{v}' names {len(hits)} existing records; review will ask which")
-                    elif hits[0]["schema"] in schema.SCHEMA and "sources" in schema.resolve(hits[0]["schema"])["props"]:
-                        cite.setdefault(hits[0]["id"], hits[0])   # an existing entity this text names: cite it
+                if v in batch_ids or v in existing_ids:
+                    links.append({"record": rid, "field": p, "value": v, "links_to": f"id: {v}"})
+                    wrong_kind(v, batch_schema.get(v) or schema_of_id.get(v))
+                    out_vals.append(v)
+                    continue
+                namesakes = batch_names.get(k, set())
+                hits = existing.get(k, [])
+                if len(namesakes) > 1 or (namesakes and hits) or (not namesakes and len(hits) > 1):
+                    cands = [{"id": i, "in": "this batch", **_facts_of_batch(recs, i)} for i in sorted(namesakes)] + \
+                            [{"id": h["id"], "in": "archive", "caption": h["caption"], "schema": h["schema"],
+                              **_facts(root, h["id"])} for h in hits]
+                    ambiguous.append({"record": rid, "field": p, "value": v, "candidates": cands})
+                    links.append({"record": rid, "field": p, "value": v, "links_to": f"{len(cands)} records: ambiguous"})
+                    warnings.append(f"{rid}.{p}: '{v}' names {len(cands)} records; give the one you mean by its id "
+                                    "(see ambiguous_links), or review will ask")
+                    out_vals.append(v)
+                elif namesakes:
+                    target = next(iter(namesakes))
+                    links.append({"record": rid, "field": p, "value": v, "links_to": f"this batch: {target}"})
+                    wrong_kind(v, batch_schema.get(target))
+                    out_vals.append(target if link_by == "id" else v)
+                elif hits:
+                    h = hits[0]
+                    links.append({"record": rid, "field": p, "value": v, "links_to": f"{h['caption']} ({h['id']})"})
+                    wrong_kind(v, h.get("schema"))
+                    if h["schema"] in schema.SCHEMA and "sources" in schema.resolve(h["schema"])["props"]:
+                        cite.setdefault(h["id"], h)                # an existing entity this text names: cite it
+                    out_vals.append(h["id"] if link_by == "id" else v)
                 else:
                     links.append({"record": rid, "field": p, "value": v, "links_to": None})
                     warnings.append(f"{rid}.{p}: '{v}' is no record in this batch or the archive; it stays "
                                     "a name until a record for it exists (`hydra-ctl stubs` lists these)")
+                    out_vals.append(v)
+            props[p] = out_vals
         # roles: what each one ranks as under the hierarchy in effect
         for p in ("role", "position"):
             if p not in pdefs:
@@ -468,12 +641,71 @@ def check_records(root: Path, records: list[dict], collection: str | None = None
                 if pos is None:
                     warnings.append(f"{rid}.{p}: '{v}' takes no position, so it ranks no one; to rank it, add "
                                     f"'{types.norm_text(v)}' to a position's titles in .hydra/rules/positions.yaml")
+        # words a vocabulary covers (a status, a capacity): one it does not list is kept, but nothing acts on it
+        for p, vals in props.items():
+            for v in vals:
+                if vocab.outside(vocabs, sname, p, v):
+                    name, voc = vocab.lookup(vocabs, sname, p)
+                    warnings.append(f"{rid}.{p}: '{v}' is not a {name} word hydra knows ({', '.join(voc['values'])}); "
+                                    f"it is shown as typed and nothing acts on it. Use one of those when the source "
+                                    f"supports it, or leave `{p}` out; the owner may add the word to {layout.VOCABULARIES}")
+        # coded values (ISO country, currency, language): a code the standard lacks is never named
+        for p, vals in props.items():
+            kind = std.kind_of(sname, p, (pdefs.get(p) or {}).get("type"))
+            for v in vals if kind else ():
+                if std.valid(kind, v) is False:
+                    warnings.append(f"{rid}.{p}: '{v}' is no ISO {kind} code; write the code (country 'sa', currency "
+                                    f"'SAR', language 'ara'), not a name or a symbol")
+        # upstream: H pins and keys. A key the archive already holds makes this record that entity
+        for v in props.get("upstream") or []:
+            from hydra.universe import hid
+            if not hkeys.parse(v) and hid.pin_key(v) is None:
+                errors.append(f"{rid}.upstream: '{v}' is neither an H (H-p0-...) nor a key (namespace:key, "
+                              "e.g. wikidata:Q57340 or acme:EMP-0042)")
+        for k in sorted(hkeys.of_record(keyconf, props)):
+            row = keyed.get(k)
+            if row:
+                keyed_out.append({"record": rid, "key": k, "entity": row.get("title"), "h": row["h"]})
+                warnings.append(f"{rid}: key {k} already belongs to {row.get('title')} ({row['h']}); this record "
+                                "will be that entity. If it is not, the key is wrong: correct it or leave it out")
+            elif k.split(":", 1)[0] not in keyconf["namespaces"]:
+                warnings.append(f"{rid}: key namespace '{k.split(':', 1)[0]}' is not declared in {layout.KEYS}; it "
+                                "merges all the same. Check the spelling (a misspelt namespace merges nothing)")
+        # sources: every kept source a record cites exists; every note is in its sources, word for word
+        texts = [batch_text] if batch_text else []
+        for sid in list(props.get("sources") or []) + list((r.get("_meta") or {}).get("cites") or []):
+            if sid in batch_ids:
+                continue
+            if sid not in kept_text:
+                kept_text[sid] = src.text_of(root, sid)
+            if kept_text[sid] is None:
+                try:
+                    _existing_source(root, sid)
+                except IngestError:
+                    errors.append(f"{rid}.sources: '{sid}' is no source in the archive (fetch_source keeps a web "
+                                  "page as one; save with source.file keeps a file)")
+            else:
+                texts.append(kept_text[sid])
+        for n in props.get("notes") or []:
+            if not texts:
+                warnings.append(f"{rid}.notes: no source text to check this note against; give the batch a source "
+                                "or cite a kept source in `sources`")
+                break
+            if not src.verbatim(n, texts):
+                errors.append(f"{rid}.notes: '{n[:90]}' is not in the record's sources word for word. Notes are "
+                              "printed as the source's quote: copy the sentence exactly (read_source with `find` "
+                              "locates it), or leave `notes` out")
         # an entity that may already be in the archive: review will propose the merge
         same = [h for h in existing.get(types.norm_text(props["name"][0]), []) if h["schema"] == sname] \
             if not edge and props.get("name") else []
-        if same:                          # its exact name and type: the same entity, citing this text
+        if same:                          # its exact name and type: perhaps the same entity, citing this text
+            h = _h_of(root, same[0]["id"])
             cited.append({"record": rid, "name": props["name"][0], "existing": same[0]["caption"],
-                          "existing_id": same[0]["id"]})
+                          "existing_id": same[0]["id"], **({"h": h} if h else {})})
+            if h and not props.get("upstream"):
+                warnings.append(f"{rid}: '{props['name'][0]}' has the name and type of an entity already here "
+                                f"({same[0]['id']}, {h}). A name is no proof: if it is that entity, add "
+                                f"\"upstream\": [\"{h}\"]; if not, leave it and review will ask")
         elif not edge and props.get("name") and _built(root):
             from hydra.cli import node
             hit = next((h for h in node.find(root, props["name"][0], sname, field="name", limit=1)
@@ -486,8 +718,8 @@ def check_records(root: Path, records: list[dict], collection: str | None = None
     auto = [{"schema": h["schema"], "name": h["caption"], "existing_id": i} for i, h in cite.items()
             if types.norm_text(h["caption"] or "") not in named and types.norm_text(h["caption"] or "") not in in_batch]
     return {"ok": not errors, "errors": errors, "warnings": warnings, "records": recs,
-            "links": links, "roles": roles, "possible_duplicates": duplicates,
-            "existing_entities_cited": cited, "will_also_cite": auto,
+            "links": links, "ambiguous_links": ambiguous, "roles": roles, "possible_duplicates": duplicates,
+            "existing_entities_cited": cited, "will_also_cite": auto, "keyed": keyed_out,
             "note": ("possible_duplicates are not errors: if they are the same entity, the build proposes "
                      "the merge and the archive's owner confirms it in review.") if duplicates else None}
 
@@ -508,11 +740,7 @@ def resolve_file(root: Path | None, path: str) -> Path:
 def _source_entries(root: Path) -> list[dict]:
     out = []
     for f in resources.record_files(root)[1]:
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            continue
-        out += [{**r, "collection": f.stem} for r in data if isinstance(data, list) and isinstance(r, dict)]
+        out += [{**r, "collection": f.stem} for r in _load_records(f)]
     return out
 
 
@@ -570,7 +798,9 @@ def _new_source(root: Path, collection: str, source: dict) -> tuple[dict, Path |
             props[prop] = [str(source[key])]
     if props.get("publishedAt") and dates.bounds(props["publishedAt"][0]) is None:
         raise IngestError(f"source.published '{props['publishedAt'][0]}' is not a date (YYYY, YYYY-MM or YYYY-MM-DD)")
-    doc = {"id": f"{collection}-source", "schema": "Article" if source.get("url") else "Document", "properties": props}
+    doc = {"id": mint.document_id(props["contentHash"][0] if props.get("contentHash")
+                                  else hashlib.sha1(props["bodyText"][0].encode("utf-8")).hexdigest()),
+           "schema": "Article" if source.get("url") else "Document", "properties": props}
     return doc, path, notes
 
 
@@ -582,36 +812,65 @@ def _existing_source(root: Path, sid: str) -> dict:
     raise IngestError(f"no source '{sid}' in the archive (`hydra-ctl sources` lists them)")
 
 
+AGENT = "agent:hydra-mcp"           # who history says made a change through these tools
+
+
+def _publish_pinned(root: Path, recs: list[dict]) -> int:
+    """An `upstream` pin is a promise that the H holds: a computed H pinned becomes published."""
+    from hydra.universe import review
+    return review.publish_pinned(root, recs, by=AGENT)
+
+
 def ingest(root: Path, records: list[dict], source: dict, collection: str | None = None,
-           replace: bool = False, rebuild: bool = True) -> dict:
+           replace: bool = False, rebuild: bool = True, link_by: str = "id") -> dict:
     """Check the batch; if it has no errors, write it as a new collection citing its
     source (a file, a text, or an earlier source by id), then rebuild and report
     what changed. Refuses an existing collection unless `replace`."""
     source = source or {}
+    per_record = not (source.get("id") or source.get("file") or source.get("text"))   # each record cites its own
     old_src = _existing_source(root, source["id"]) if source.get("id") else None
     stem = (Path(str(source["file"])).stem if source.get("file") else
-            old_src["collection"] if old_src else str(source.get("title") or "text"))
+            old_src["collection"] if old_src else str(source.get("title") or ("batch" if per_record else "text")))
     collection = collection or f"{_slug(str(source.get('title') or stem))}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     if not VALID_NAME.match(collection):
         raise IngestError(f"'{collection}' cannot name a collection (letters, digits, - and _)")
-    report = check_records(root, records, collection if replace else None)
+    report = check_records(root, records, collection if replace else None, link_by=link_by,
+                           source=None if per_record else source)
+    if per_record and report["ok"]:
+        bare = [r["id"] for r in report["records"] if "sources" in schema.resolve(r["schema"])["props"]
+                and not r["properties"].get("sources")]
+        if bare:
+            report["ok"] = False
+            report["errors"].append(f"no `source` for the batch, and {len(bare)} records cite none of their own "
+                                    f"({', '.join(bare[:5])}): give `source`, or `sources` on each record")
     if not report["ok"]:
-        return {"saved": False, "errors": report["errors"], "warnings": report["warnings"]}
+        return {"saved": False, "errors": report["errors"], "warnings": report["warnings"],
+                **({"ambiguous_links": report["ambiguous_links"]} if report["ambiguous_links"] else {})}
     cfile = root / layout.COLLECTIONS_DIR / f"{collection}.json"
     sfile = root / layout.SOURCE_ENTRIES / f"{collection}.json"
     if (cfile.exists() or (sfile.exists() and not old_src)) and not replace:
         raise IngestError(f"collection '{collection}' exists; pass replace=true or another name")
-    if old_src:
+    storable(report["records"])
+    if per_record:
+        doc, fpath, notes, sid = None, None, [], None
+    elif old_src:
         doc, fpath, notes, sid = None, None, [], old_src["id"]
     else:
         doc, fpath, notes = _new_source(root, collection, source)
         sid = doc["id"]
-    extra = normalize([{"schema": a["schema"], "properties": {"name": [a["name"]]}} for a in report["will_also_cite"]],
+    # an existing entity the text names gets a record citing it, pinned to that entity's H (so it
+    # is that entity, not a namesake): hydra-mcp made it from the entity, so the identity is certain
+    pins = {a["existing_id"]: _h_of(root, a["existing_id"]) for a in report["will_also_cite"]}
+    extra = normalize([{"schema": a["schema"], "properties": {"name": [a["name"]],
+                                                              **({"upstream": [pins[a["existing_id"]]]}
+                                                                 if pins[a["existing_id"]] else {})}}
+                       for a in report["will_also_cite"]],
                       set(_ids_in(root, skip=collection if replace else None)) | {r["id"] for r in report["records"]})
+    _publish_pinned(root, [*report["records"], *extra])
     cites = lambda r: "sources" in schema.resolve(r["schema"])["props"]
     recs = [{**r, "properties": {**r["properties"],
                                  "sources": list(dict.fromkeys((r["properties"].get("sources") or []) + [sid]))}}
-            if cites(r) else r for r in report["records"] + extra]
+            if cites(r) and sid else r for r in report["records"] + extra]
     ffile = root / SOURCE_FILES / collection / fpath.name if fpath else None
     written = [cfile] + ([sfile] if doc else []) + ([ffile] if ffile else [])
     old = {f: f.read_bytes() for f in written if f.exists()}
@@ -638,5 +897,11 @@ def ingest(root: Path, records: list[dict], source: dict, collection: str | None
             f.write_bytes(old[f]) if f in old else f.unlink(missing_ok=True)
         raise IngestError(f"the build failed, so nothing was kept: {e}") from None
     out.update({"build": build.report(root, summary, verb="Rebuilt"),
-                "issues": [i for i in summary.get("issues") or [] if i.get("file") in set(rel)]})
+                "issues": [i for i in summary.get("issues") or [] if i.get("file") in set(rel)
+                           or i.get("code", "").startswith("facts.")],
+                "ambiguous_links": report["ambiguous_links"]})
+    snap = history.auto(root, f"hydra-mcp save: {collection} ({len(recs)} records)", who=AGENT)
+    if snap:
+        out["snapshot"] = snap
+        out["undo"] = f"history restore {snap[:12]}~1 (or: {out['undo']})"
     return out

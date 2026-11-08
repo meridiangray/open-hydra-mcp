@@ -1,11 +1,12 @@
 """hydra-mcp's ingestion logic, on fresh archives: what it reports, what it refuses,
 and what it writes."""
+import hashlib
 import json
 
 import pytest
 
 from hydra import cli, layout
-from hydra_mcp import core
+from hydra_mcp import core, mint
 
 TEXT = ("ACME TIMES, 3 May 2021. Dana Hale, administrator of the Port Authority, said her deputy "
         "Rob Kerr would lead the inquiry. Kerr was appointed VP of Operations at Harbor Coop in 2019.")
@@ -53,17 +54,26 @@ def test_roles_rank_by_the_hierarchy_and_unranked_ones_are_reported_not_changed(
 
 def test_errors_block_and_name_the_problem(archive):
     bad = [{"schema": "Persn", "properties": {"name": "X"}},
-           {"schema": "Person", "properties": {"name": "Y", "colour": "red", "birthDate": "circa 1990", "portrait": "y.jpg"}},
+           {"schema": "Person", "properties": {"name": "Y", "colour": "red", "birthDate": "the nineties", "portrait": "y.jpg"}},
            {"schema": "Membership", "properties": {"member": "Y"}},
            {"schema": "Thing", "properties": {"name": "Z"}},
            {"schema": "Person", "properties": {"alias": "No Name"}}]
     errs = " | ".join(core.check_records(archive, bad)["errors"])
-    for part in ("no schema 'Persn'", "has no property 'colour'", "'circa 1990' is not a date",
+    for part in ("no schema 'Persn'", "has no property 'colour'", "'the nineties' is not a date",
                  "records never carry images", "a Membership needs `organization`", "Thing is abstract",
                  "a Person needs a `name`"):
         assert part in errs, part
     out = core.ingest(archive, bad, {"text": "x"}, "bad")
     assert out["saved"] is False and not (archive / layout.COLLECTIONS_DIR / "bad.json").exists()
+
+
+def test_approximate_dates_keep_their_qualifier(archive):
+    recs = [{"schema": "Person", "properties": {"name": "Y", "birthDate": "circa 1990"}}]
+    rep = core.check_records(archive, recs)
+    assert not any("is not a date" in e for e in rep["errors"])
+    out = rep["records"][0]
+    assert out["properties"]["birthDate"] == ["1990"]
+    assert out["_meta"]["approx"] == {"birthDate": "circa"}
 
 
 def test_links_point_into_the_batch_the_archive_or_nowhere(archive):
@@ -86,13 +96,15 @@ def test_an_ingestion_stores_the_text_as_the_source_every_record_cites(archive):
     assert doc["schema"] == "Article" and doc["properties"]["bodyText"] == [TEXT]
     recs = json.loads((archive / out["files"][0]).read_text())
     ents = [r for r in recs if r["schema"] != "Employment"]
-    assert all(r["properties"]["sources"] == ["port-inquiry-source"] for r in ents)
+    sid = doc["id"]
+    assert mint.is_minted(sid) and sid == mint.document_id(hashlib.sha1(TEXT.encode()).hexdigest())
+    assert all(r["properties"]["sources"] == [sid] for r in ents)
     assert not any("sources" in r["properties"] for r in recs if r["schema"] == "Employment")   # no such field
     assert not [i for i in out["issues"] if i["code"] == "records.unknown-property"]
     assert "Rebuilt" in out["build"] and not [i for i in out["issues"] if i["level"] == "error"]
     claims = [json.loads(l) for l in (archive / layout.CLAIMS_JSONL).read_text().splitlines()]
     cited = {c["value"] for c in claims if c["prop"] == "sources"}
-    assert cited and all("port-inquiry-source" in v for v in cited)            # each value traces to the text
+    assert cited and all(sid in v for v in cited)            # each value traces to the text
     with pytest.raises(core.IngestError, match="exists"):
         core.ingest(archive, BATCH, {"text": TEXT}, "port-inquiry")
 
@@ -101,12 +113,12 @@ def test_a_second_report_of_the_same_person_cites_the_existing_one_and_hydra_dec
     core.ingest(archive, BATCH, {"text": TEXT}, "first")
     rep = core.check_records(archive, [{"schema": "Person", "properties": {"name": "Rob Kerr"}}])
     assert [d["existing"] for d in rep["existing_entities_cited"]] == ["Rob Kerr"] and not rep["possible_duplicates"]
-    assert rep["records"][0]["id"] == "person-rob-kerr-2"                       # never an id the archive uses
+    assert mint.is_minted(rep["records"][0]["id"]) and rep["records"][0]["id"].startswith("per-")
     out = core.ingest(archive, [{"schema": "Person", "properties": {"name": "Rob Kerr", "nationality": "us"}}],
                       {"text": "Rob Kerr is a US citizen."}, "second")
     assert out["saved"]                                        # hydra decides whether they're the same person
     recs = json.loads((archive / "collections/second.json").read_text())
-    assert [r["properties"]["sources"] for r in recs] == [["second-source"]]
+    assert [r["properties"]["sources"] for r in recs] == [[mint.document_id(hashlib.sha1(b"Rob Kerr is a US citizen.").hexdigest())]]
 
 
 def test_schema_is_described_and_unknown_ones_are_refused(archive):
