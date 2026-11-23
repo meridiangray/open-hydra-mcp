@@ -86,9 +86,13 @@ def test_unreadable_files_say_why(archive, tmp_path):
 def test_a_long_file_is_read_in_parts(archive, tmp_path):
     long = "\n\n".join(f"Paragraph {i}. " + " ".join(["word"] * 50) for i in range(400))
     (tmp_path / "long.txt").write_text(long)
-    first = server.read_file(str(tmp_path / "long.txt"), archive=str(archive))
-    rest = server.read_file(str(tmp_path / "long.txt"), offset=first["next_offset"], archive=str(archive))
-    assert len(first["text"]) == core.READ_LIMIT and first["text"] + rest["text"] == long and rest["next_offset"] is None
+    first = server.read_file(str(tmp_path / "long.txt"), offset=0, archive=str(archive))
+    assert len(first["text"]) == core.READ_LIMIT
+    got, part = first["text"], first
+    while part["next_offset"] is not None:
+        part = server.read_file(str(tmp_path / "long.txt"), offset=part["next_offset"], archive=str(archive))
+        got += part["text"]
+    assert got == long
 
 
 def test_a_file_is_saved_as_the_evidence_with_its_original_and_exact_text(archive, tmp_path):
@@ -112,7 +116,8 @@ def test_a_file_is_saved_as_the_evidence_with_its_original_and_exact_text(archiv
     text_sha1 = hashlib.sha1(server.read_file(str(f), archive=str(archive))["text"].encode()).hexdigest()
     import pypdf
     assert doc["processingAgent"] == [f"hydra-mcp files.read (pypdf {pypdf.__version__})"]
-    assert doc["notes"] == [f"sha1 of the text extracted from this file: {text_sha1}"]
+    assert "notes" not in doc                                                # notes hold what the source says, not a checksum
+    assert doc["processingStatus"] == [f"text extracted; sha1 of the text {text_sha1}"]
     assert doc["publisher"] == ["Acme Times"]
     assert {c["value"] for c in claims(archive) if c["prop"] == "sources"} == {"case:" + sid}
     assert server.read_file(str(f), archive=str(archive))["already_in_archive"]["source"] == sid

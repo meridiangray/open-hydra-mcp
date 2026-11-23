@@ -24,7 +24,7 @@ def nowhere(tmp_path, monkeypatch):
 def test_with_no_archive_the_guidelines_and_reading_still_work_and_say_so(nowhere):
     g = server.labelling_guidelines()
     assert g.startswith("> No archive is selected") and "## Record format" in g and "Second-in-command" in g
-    assert server.find_entities("Dana Hale") == []
+    assert server.find_entities("Dana Hale")["entities"] == []
     assert not list(nowhere.iterdir())                                # nothing was written anywhere
 
 
@@ -62,7 +62,7 @@ def test_create_archive_previews_then_creates_and_the_text_can_go_in(nowhere):
     assert got["saved"] and "Rebuilt" in got["build"]
     ids = [r["id"] for r in json.loads((dest / "collections/first.json").read_text())]
     assert mint.is_minted(ids[0]) and ids[0].startswith("per-")
-    assert server.find_entities("Dana Hale", archive=out["archive"])[0]["id"] == "port-inquiry:" + ids[0]
+    assert server.find_entities("Dana Hale", archive=out["archive"])["entities"][0]["id"] == "port-inquiry:" + ids[0]
 
 
 def test_create_archive_refuses_a_folder_with_files(nowhere):

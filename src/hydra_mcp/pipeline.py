@@ -96,7 +96,8 @@ def publish(root: Path, hs: list[str] | None = None, collections: list[str] | No
                                "person, then call again with confirm=true"}
     n = review.publish(root, todo, by=core.AGENT)
     ubuild.build(root)
-    from hydra_mcp import agent
+    from hydra_mcp import agent, workflows
+    workflows.hook_log(root, f"publish {n} H(s)")
     return {**out, "published": n, "snapshot": agent._snap(root, f"publish {n} Hs")}
 
 
@@ -129,43 +130,100 @@ def _text(fragment: str) -> str:
     return "\n".join(x for x in lines if x)
 
 
+def _strip_divs(html: str, classes: tuple[str, ...]) -> str:
+    cls_pat = "|".join(re.escape(c) for c in classes)
+    rx = re.compile(rf"<div\b[^>]*\bclass=['\"]?(?:[^'\">\s]*\s+)*(?:{cls_pat})\b[^>]*>", re.I)
+    tag_rx = re.compile(r"<(/?)div\b[^>]*>", re.I)
+    while True:
+        m = rx.search(html)
+        if not m:
+            break
+        depth, pos = 1, m.end()
+        while depth > 0:
+            tm = tag_rx.search(html, pos)
+            if not tm:
+                pos = len(html)
+                break
+            depth += -1 if tm.group(1) else 1
+            pos = tm.end()
+        html = html[:m.start()] + html[pos:]
+    return html
+
+
+def _link_places(w, page: dict, rows: list[dict]) -> list[dict]:
+    """Each infobox row with the entries its values name: `links` [{text, h, title}]. A value that resolved to an entry
+    links to it; a place-valued field (birthPlace, address, location, registrationPort) holding the name of a Place
+    entry links to that Place's page."""
+    from hydra.geo import query as gquery
+    places: dict[str, str] = {}
+    for b, q in w.pages.items():
+        if q.get("schema") == "Place" and b in w.listed:
+            for n in [q["title"], *(q.get("aliases") or ())]:
+                places.setdefault(str(n).strip().casefold(), b)
+    by_label = {}
+    for box in page.get("infobox") or ():
+        by_label.setdefault({"birthPlace": "Born", "birthDate": "Born"}.get(box["prop"], box.get("label")), []).append(box)
+    out = []
+    for r in rows:
+        links, seen = [], set()
+        for box in by_label.get(r["label"], ()):
+            for v in box.get("values") or ():
+                b = v.get("h") if v.get("h") in w.pages else None
+                if not b and box["prop"] in gquery.PLACE_TEXT_PROPS:
+                    b = places.get(str(v.get("value") or "").strip().casefold())
+                if b and b not in seen and b in w.listed:
+                    seen.add(b)
+                    links.append({"text": str(v.get("value") or w.title(b)), "h": w.pages[b].get("h"), "title": w.title(b)})
+        out.append({**r, **({"links": links} if links else {})})
+    return out
+
+
 def read_page(root: Path, entity: str) -> dict:
     """An entry's page as a reader sees it: title, id, scope, the infobox rows, the lead, each section's
     text in order, and its footnotes [n] resolved to the record, collection, source and quote behind them."""
-    from hydra import scope as sc
     from hydra.wiki import site
     _universe(root)
     w = _wiki(root)
-    names, _ = sc._resolver(list(w.pages.values()))
-    hits = sorted(names(entity), key=lambda b: (b not in w.listed, w.title(b)))
-    if not hits:
-        raise IngestError(f"no page is '{entity}' (an H, a key, a record id or a title)")
-    body = hits[0]
+    body = core.resolve_entity(root, entity).body          # one page, strictly: a shared title is refused with its Hs
+    if body not in w.pages:
+        raise IngestError(f"'{entity}' has no page in the wiki's last build: universe_build, then call again")
     p = w.pages[body]
     page = w.render_page(site.Links(static=False), body)
     box = re.search(r"<table class=infobox>(.*?)</table>", page, re.S)
     rows = [{"label": _text(th), "value": _text(td)}
             for th, td in re.findall(r"<tr><th>(.*?)</th><td>(.*?)</td></tr>", box.group(1) if box else "", re.S)]
+    rows = _link_places(w, p, rows)
     main = page[box.end():] if box else page
-    main = main[:main.find("<footer")] if "<footer" in main else main
+    end = re.search(r"<div class=['\"]?(?:navboxes|cats)\b|<footer\b", main)
+    if end:
+        main = main[:end.start()]
+    main = re.sub(r"<script\b[^>]*>.*?</script>", "", main, flags=re.S | re.I)
+    main = re.sub(r"<span class=info\b[^>]*>.*?</span>", "", main, flags=re.S)       # a heading's "i" tooltip is no heading text
     parts = re.split(r"<h2[^>]*>(.*?)</h2>", main)
-    lead = _text(re.sub(r"<nav class=toc>.*?</nav>", "", parts[0], flags=re.S))
+    lead_html = _strip_divs(re.sub(r"<nav class=toc>.*?</nav>", "", parts[0], flags=re.S), ("widget", "tabbar"))
+    lead = _text(lead_html)
     sections = [{"heading": _text(parts[i]), "text": _text(parts[i + 1])[:4000]} for i in range(1, len(parts) - 1, 2)
                 if _text(parts[i]) not in ("References",)]
     notes = [{"n": c["n"], "record": c["record"], "collection": c.get("collection"),
               "source": [d["title"] for d in c.get("docs") or []] + list(c.get("urls") or []),
               **({"quote": c["quote"]} if c.get("quote") else {})} for c in p["citations"]]
+    geo_info = None
+    if (root / layout.GEO_PARSED / "located.jsonl").is_file():
+        from hydra.geo import query as gquery
+        gm = gquery.load(root)
+        if body in gm.rows:
+            geo_info = gquery.locate(root, body)
     return {"title": p["title"], "h": p["h"], "schema": p["schema"], "scope": p.get("scope") or {"in": True},
             "infobox": rows, "lead": lead, "sections": sections, "footnotes": notes,
-            **({"also": [w.title(b) for b in hits[1:6]]} if len(hits) > 1 else {})}
+            **({"geo": geo_info} if geo_info else {})}
 
 
 # ---- scope ---------------------------------------------------------------------------
 
 def scope(root: Path, entity: str | None = None) -> dict:
     """What the archive is about (scope.yaml) as the last build computed it: how many entries are
-    in scope, the context ones, and for `entity` (an H, key, record id or title) whether it is in
-    scope and why."""
+    in scope, the context ones, and for `entity` (an H, key, record id or a title only one entry
+    has; a shared title is refused with its Hs) whether it is in scope and why."""
     from hydra import scope as sc
     _universe(root)
     pages = _built_pages(root)
@@ -174,10 +232,16 @@ def scope(root: Path, entity: str | None = None) -> dict:
     out = {"file": conf["file"], "seeds": conf["seeds"], "include": conf["include"], "exclude": conf["exclude"],
            "in_scope": len(pages) - len(ctx), "context": len(ctx), "context_entries": ctx}
     if entity:
-        names, _ = sc._resolver(pages)
-        hit = [p for p in pages if p["body"] in names(entity)]
-        out["entity"] = [{"title": p["title"], "h": p["h"], **(p.get("scope") or {"in": True})} for p in hit] or \
-            f"no entry is '{entity}'"
+        from hydra import entities
+        from hydra_mcp import workflows
+        try:
+            hit = core.resolve_entity(root, entity)        # one entry, strictly: a shared title is refused with its Hs
+        except IngestError as e:
+            return workflows.failure_payload(e)
+        p = entities.catalog(root).page(hit.body)
+        rows = [{"title": p["title"], "h": p["h"], **(p.get("scope") or {"in": True})}]
+        return {"entity": rows, "in_scope_here": all(r.get("in", True) for r in rows),
+                "archive_scope": {"in_scope": out["in_scope"], "context": out["context"]}}
     return out
 
 
@@ -220,7 +284,8 @@ def set_scope(root: Path, include: list[str] | None = None, exclude: list[str] |
     f.write_text("# .hydra/rules/scope.yaml — what this archive is about (see hydra's template for every key)\n"
                  + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
     ubuild.build(root)
-    from hydra_mcp import agent
+    from hydra_mcp import agent, workflows
+    workflows.hook_log(root, f"set_scope {scope}")
     return {**out, "written": str(f), "snapshot": agent._snap(root, "scope")}
 
 
@@ -252,7 +317,8 @@ def graduate(root: Path, name: str, as_schema: str = "", confirm: bool = False) 
         sc.graduate(root, name, as_schema, False, said.append)
     except SystemExit as x:
         raise IngestError(str(x).removeprefix("hydra: ")) from None
-    from hydra_mcp import agent
+    from hydra_mcp import agent, workflows
+    workflows.hook_log(root, f"graduate {name} ({as_schema})")
     return {**out, "graduated": True, "build": said[-1] if said else None, "snapshot": agent._snap(root, f"graduate {name}")}
 
 
@@ -337,6 +403,15 @@ def wiki_serve(root: Path, port: int = 8080, theme: str | None = None, replace_o
         rebuilt = True
     built = _built_pages(root)                       # the wiki lists (and its footer counts) the pages in scope
     expected = sum(1 for p in built if (p.get("scope") or {}).get("in", True))
+    sf = _state(port)
+    if sf.is_file() and not replace_other:             # a wiki this tool started for another archive may be the person's
+        try:
+            st = json.loads(sf.read_text(encoding="utf-8"))
+        except ValueError:
+            st = {}
+        if st.get("pid") and _alive(st["pid"]) and Path(st.get("root") or "").resolve() != Path(root).resolve():
+            raise IngestError(f"a wiki of another archive ({st.get('root')}) is running on port {port}: pick another "
+                              "port, or, with the person's agreement, call again with replace_other=true")
     stopped = wiki_stop(port)
     if _get(port) is not None or _listener(port):
         pid = _listener(port)

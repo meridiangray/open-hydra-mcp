@@ -76,12 +76,19 @@ class _Text(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.out, self.skip, self.title, self._in_title = [], 0, "", False
+        self.out, self.skip, self.title, self._in_title, self._titled = [], 0, "", False, False
+        self.og, self.h1, self._in_h1 = "", "", 0                      # og:title and the first <h1>, a page's own title
 
     def handle_starttag(self, tag, attrs):
+        if tag == "meta" and not self.og:
+            a = {k.lower(): v for k, v in attrs if k}
+            if (a.get("property") or a.get("name") or "").lower() == "og:title" and a.get("content"):
+                self.og = a["content"]
         if tag in self.SKIP:
             self.skip += 1
-        if tag == "title":
+        if tag == "h1" and not self.skip and not self.h1:
+            self._in_h1 += 1
+        if tag == "title" and not self.skip and not self._titled:      # an <svg><title>Chevron</title></svg> is an icon's name, not the page's
             self._in_title = True
         if tag in self.BLOCK:
             self.out.append("\n")
@@ -89,8 +96,10 @@ class _Text(HTMLParser):
     def handle_endtag(self, tag):
         if tag in self.SKIP and self.skip:
             self.skip -= 1
-        if tag == "title":
-            self._in_title = False
+        if tag == "title" and self._in_title:
+            self._in_title, self._titled = False, True
+        if tag == "h1" and self._in_h1:
+            self._in_h1 = 0
         if tag in self.BLOCK:
             self.out.append("\n")
 
@@ -99,6 +108,8 @@ class _Text(HTMLParser):
             self.title += data
         elif not self.skip:
             self.out.append(data)
+            if self._in_h1:
+                self.h1 += data
 
 
 def _html_text(raw: str) -> tuple[str, str]:
@@ -106,7 +117,25 @@ def _html_text(raw: str) -> tuple[str, str]:
     p.feed(raw)
     text = re.sub(r"[ \t]+", " ", "".join(p.out))
     text = re.sub(r"\n\s*\n+", "\n\n", re.sub(r" *\n *", "\n", text)).strip()
-    return text, p.title.strip()
+    return text, page_title(p.og, p.h1, p.title)
+
+
+_MENU_WORDS = r"(?:Menu|Search|Chevron|User|Close|Open|Sign ?[Ii]n|Log ?[Ii]n|Subscribe|Account|Toggle)"
+MENU = re.compile(rf"(?<=[a-z]){_MENU_WORDS}|{_MENU_WORDS}(?=[A-Z])")      # glued to the word before, or after
+
+
+def page_title(og: str, h1: str, title: str) -> str:
+    """A fetched page's own title (Archive Workflow G14): its og:title, else its first <h1>, else <title>; and the
+    site's menu words glued on after it ("...targets | The NationalMenu SearchUserUserChevron") cut off."""
+    for t in (og, h1, title):
+        t = re.sub(r"\s+", " ", t or "").strip()
+        if not t:
+            continue
+        m = MENU.search(t)
+        if m and m.start() > 0:
+            t = t[:m.start()].rstrip(" |-·:")
+        return t[:300]
+    return ""
 
 
 def _get(url: str) -> tuple[bytes, str]:
@@ -155,10 +184,33 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:60] or "page"
 
 
+def assess(got: dict) -> str | None:
+    """Why a fetched web page is probably no evidence: a front page, hardly any text, or little but
+    navigation. None when it looks like an article. Wikipedia text is never thin."""
+    if got.get("kind") != "html":
+        return None
+    text = got.get("text") or ""
+    u = urllib.parse.urlsplit(got.get("url") or "")
+    if u.scheme and u.path in ("", "/") and not u.query:
+        return f"{u.netloc} is a front page (a root address), not an article"
+    if len(text.strip()) < 600:
+        return f"very little text ({len(text.strip())} characters)"
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    short = sum(1 for x in lines if len(x.split()) <= 4)
+    prose = sum(1 for x in lines if len(x.split()) >= 12)
+    if len(lines) >= 10 and short / len(lines) >= 0.8 and prose <= 2:
+        return f"mostly navigation: {short} of {len(lines)} lines are menu-sized, {prose} are sentences"
+    return None
+
+
 def fetch(root: Path, url: str, title: str | None = None, published: str | None = None,
-          author: str | None = None) -> dict:
-    """Fetch `url` and keep its text as a source of its own; -> its id and the first part of the text."""
-    got = page(url)
+          author: str | None = None, publisher: str | None = None, summary: str | None = None,
+          language: str | None = None, keywords: list[str] | None = None, prefetched: dict | None = None,
+          keep_thin: bool = True) -> dict:
+    """Fetch `url` and keep its text as a source of its own; -> its id and the first part of the text.
+    `prefetched`: the result of `page(url)` already fetched (a caller that holds the write lock only to write).
+    `keep_thin` False: a page that looks useless (see `assess`) is not kept; the result says why."""
+    got = prefetched if prefetched is not None else page(url)
     if not got["text"].strip():
         raise IngestError(f"{got['url']} has no text to keep (a page built by scripts?): save it as a file instead")
     with tempfile.TemporaryDirectory(prefix="hydra-fetch-") as tmp:
@@ -169,41 +221,235 @@ def fetch(root: Path, url: str, title: str | None = None, published: str | None 
         if have:
             return {"source_id": have["id"], "already_kept": True, "url": got["url"], "title": got["title"],
                     **_part(got["text"], 0)}
+        thin = assess(got)
+        if thin and not keep_thin:
+            return {"kept": False, "quality": "thin", "reason": thin, "url": got["url"], "title": got["title"],
+                    "kind": got["kind"], "chars": len(got["text"]), "text": got["text"][:600],
+                    "next": "this page is probably no evidence: fetch the article's own address instead; "
+                            "to keep it all the same, call again with keep=true"}
         coll, n = f"src-{_slug(got['title'])}", 1
         while (root / layout.SOURCE_ENTRIES / f"{coll}.json").exists():
             n += 1
             coll = f"src-{_slug(got['title'])}-{n}"
         doc, path, _ = core._new_source(root, coll, {"file": str(f), "url": got["url"], "title": title or got["title"],
-                                                     "publisher": got["publisher"], "published": published,
-                                                     "author": author})
+                                                     "publisher": publisher or got["publisher"],
+                                                     "published": published, "author": author,
+                                                     "summary": summary, "language": language,
+                                                     "keywords": keywords})
         sfile = root / layout.SOURCE_ENTRIES / f"{coll}.json"
         ffile = root / core.SOURCE_FILES / coll / path.name
         for x in (sfile, ffile):
             x.parent.mkdir(parents=True, exist_ok=True)
         sfile.write_text(json.dumps([doc], indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         ffile.write_bytes(path.read_bytes())
-    from hydra_mcp import agent
+    from hydra_mcp import agent, workflows
     snap = agent._snap(root, f"fetch {got['url']}")
-    return {"source_id": doc["id"], "already_kept": False, "url": got["url"], "title": doc["properties"]["title"][0],
+    workflows.hook_source(root, doc["id"], f"fetch_source {doc['id']} ({got['title']})")
+    return {"source_id": doc["id"], "already_kept": False, "kept": True,
+            "quality": "thin" if thin else "ok", **({"reason": thin} if thin else {}),
+            "url": got["url"], "title": doc["properties"]["title"][0],
             "kind": got["kind"], "kept_as": ffile.relative_to(root).as_posix(), **({"snapshot": snap} if snap else {}),
             **_part(got["text"], 0),
             "next": f'cite it on each record it supports: "sources": ["{doc["id"]}"]; quote it verbatim in `notes`'}
 
 
-def text_of(root: Path, source_id: str) -> str | None:
-    """The text of a kept source (its file's text, or its body text); None when there is none."""
+def citers(root: Path, rec: dict) -> list[str]:
+    """The records that cite a kept source: by its id in `sources`, by a citation row, or (a relationship) by its URL."""
+    from hydra import citations as hcite, resources
+    local = str(rec["id"]).split(":", 1)[-1]
+    urls = {str(u) for u in (rec.get("properties") or {}).get("sourceUrl") or ()}
+    out: list[str] = []
+    for (rid, src_id) in hcite.load(root):
+        if str(src_id).split(":", 1)[-1] == local:
+            out.append(str(rid))
+    for f in resources.record_files(root)[0]:
+        for r in core._load_records(f):
+            props = r.get("properties") or {}
+            if any(str(x).split(":", 1)[-1] == local for x in props.get("sources") or ()) \
+                    or (urls and urls & {str(u) for u in props.get("sourceUrl") or ()}):
+                out.append(str(r.get("id") or ""))
+    return list(dict.fromkeys(out))
+
+
+def drop(root: Path, source: str, confirm: bool = False) -> dict:
+    """Remove a kept source no record cites (a page fetched by mistake). One a record cites is refused, and
+    the records are listed. Without `confirm`: what would go."""
+    rec = core._existing_source(root, source)
+    cited = citers(root, rec)
+    if cited:
+        shown = ", ".join(cited[:20]) + (f" and {len(cited) - 20} more" if len(cited) > 20 else "")
+        raise IngestError(f"{rec['id']} is cited by {len(cited)} record(s): {shown}. Re-source or `amend_records` "
+                          "those first; a cited source is evidence")
+    coll = rec["collection"]
+    sfile = root / layout.SOURCE_ENTRIES / f"{coll}.json"
+    rest = [x for x in core._load_records(sfile) if x.get("id") != rec["id"]]
+    folder = root / core.SOURCE_FILES / coll
+    props = rec.get("properties") or {}
+    out = {"source": rec["id"], "title": (props.get("title") or [""])[0], "url": (props.get("sourceUrl") or [""])[0],
+           "collection": coll, "files": list(props.get("fileName") or ())}
+    if not confirm:
+        return {**out, "next": "confirm with the person, then call again with confirm=true"}
+    from hydra_mcp import agent, workflows
+    if rest:
+        sfile.write_text(json.dumps(rest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        sfile.unlink(missing_ok=True)
+    for name in props.get("fileName") or ():
+        (folder / name).unlink(missing_ok=True)
+    if folder.is_dir() and not any(folder.iterdir()):
+        folder.rmdir()
+    rep = agent._rebuild(root)
+    workflows.hook_unsource(root, rec["id"])
+    workflows.hook_log(root, f"drop_source {rec['id']}")
+    return {**out, "dropped": True, "build": rep, "snapshot": agent._snap(root, f"drop source {rec['id']}")}
+
+
+def list_sources(root: Path, query: str | None = None, uncited_only: bool = False, offset: int = 0,
+                 limit: int = 100, uncited_entities: bool = False) -> dict:
+    """List every kept source document in `.hydra/sources/entries/` (and in-data Documents when built),
+    with their `doc-...` IDs, URLs, filenames, text availability, who cites them, and uncited sources/entities."""
+    from hydra import citations as hcite, resources, sources as hsources
+    entries = core._source_entries(root)
+    claims_path = root / layout.CLAIMS_JSONL
+    built_rep = hsources.report(root) if claims_path.is_file() else None
+    by_id: dict[str, dict] = {}
+    if built_rep:
+        for group_name in ("entries", "documents"):
+            for item in built_rep.get(group_name) or ():
+                local = item["id"].split(":", 1)[-1]
+                by_id[local] = item
+                by_id[item["id"]] = item
+    # Also count citations in citations.jsonl and unbuilt collection records
+    cited_map: dict[str, set[str]] = {}
+    url_to_local: dict[str, set[str]] = {}
+    for r in entries:
+        loc = str(r["id"]).split(":", 1)[-1]
+        for u in (r.get("properties") or {}).get("sourceUrl") or ():
+            url_to_local.setdefault(str(u), set()).add(loc)
+    for (rec_id, src_id) in hcite.load(root):
+        cited_map.setdefault(str(src_id).split(":", 1)[-1], set()).add(rec_id)
+    for f in resources.record_files(root)[0]:
+        for r in core._load_records(f):
+            props = r.get("properties") or {}
+            for s in props.get("sources") or ():
+                cited_map.setdefault(str(s).split(":", 1)[-1], set()).add(r.get("id") or "")
+            for u in props.get("sourceUrl") or ():
+                for loc in url_to_local.get(str(u), ()):
+                    cited_map.setdefault(loc, set()).add(r.get("id") or "")
+    q = (query or "").strip().casefold()
+    rows = []
+    for r in entries:
+        props = r.get("properties") or {}
+        sid = str(r["id"])
+        local = sid.split(":", 1)[-1]
+        binfo = by_id.get(local) or {}
+        cited_entities = list(binfo.get("cited_by") or ())
+        extra_recs = cited_map.get(local, set())
+        cited_count = max(len(cited_entities), len(extra_recs))
+        title = ((props.get("title") or props.get("fileName") or [sid])[0])
+        url = (props.get("sourceUrl") or [""])[0]
+        pub = (props.get("publisher") or [""])[0]
+        fname = (props.get("fileName") or [""])[0]
+        uncited = cited_count == 0
+        if uncited_only and not uncited:
+            continue
+        if q and not any(q in str(x).casefold() for x in (sid, title, url, pub, fname, r.get("collection", ""))):
+            continue
+        has_text = bool(props.get("bodyText")) or any(
+            (root / core.SOURCE_FILES / r["collection"] / name).is_file()
+            for name in props.get("fileName") or ()
+        )
+        rows.append({
+            "source_id": sid,
+            "collection": r.get("collection"),
+            "schema": r.get("schema"),
+            "title": title,
+            **({"url": url} if url else {}),
+            **({"publisher": pub} if pub else {}),
+            **({"fileName": fname} if fname else {}),
+            "has_text": has_text,
+            "cited_by_count": cited_count,
+            "cited_by": [{"id": c["id"], "caption": c["caption"], "schema": c["schema"]} for c in cited_entities[:10]],
+            "uncited": uncited,
+        })
+    rows.sort(key=lambda x: (not x["uncited"], str(x["title"]).casefold(), x["source_id"]))
+    uncited_sources = [x["source_id"] for x in rows if x["uncited"]]
+    shown, paging = core.page(rows, offset, limit)
+    return {
+        "count": len(rows),
+        **paging,
+        "sources": shown,
+        "uncited_sources": uncited_sources,
+        "uncited_entities_count": len(built_rep.get("unsourced") or ()) if built_rep else 0,
+        **({"uncited_entities": (built_rep.get("unsourced") or [])[:50] if built_rep else []} if uncited_entities else {}),
+        "next": "call `read_source(source='<source_id>')` to inspect any kept source's full text or search with `find`",
+    }
+
+
+_FILE_INFO: dict = {}
+
+
+def _file_info(f: Path) -> dict:
+    """files.read of a kept file, kept for the process while the file stays as it is (a PDF is slow to read)."""
+    from hydra_mcp import files
+    st = f.stat()
+    key = (str(f), st.st_size, st.st_mtime_ns)
+    if key not in _FILE_INFO:
+        if len(_FILE_INFO) > 8:
+            _FILE_INFO.clear()
+        _FILE_INFO[key] = files.read(f)
+    return _FILE_INFO[key]
+
+
+def _kept(root: Path, source_id: str) -> tuple[str, list[dict]] | None:
+    """(text, page_ranges) of a kept source: its body text, or its file's text; None when there is none."""
     try:
         r = core._existing_source(root, source_id)
     except IngestError:
         return None
     props = r.get("properties") or {}
     if props.get("bodyText"):
-        return "\n".join(props["bodyText"])
+        return "\n".join(props["bodyText"]), []
     for name in props.get("fileName") or ():
         f = root / core.SOURCE_FILES / r["collection"] / name
         if f.is_file():
-            from hydra_mcp import files
-            return files.read(f)["text"]
+            info = _file_info(f)
+            return info["text"], info.get("page_ranges") or []
+    return None
+
+
+def text_of(root: Path, source_id: str) -> str | None:
+    """The text of a kept source (its file's text, or its body text); None when there is none."""
+    got = _kept(root, source_id)
+    return got[0] if got else None
+
+
+def page_ranges_of(root: Path, source_id: str) -> list[dict]:
+    """[{page, start, end}] over the source's text, for a kept PDF; [] for any other source."""
+    got = _kept(root, source_id)
+    return got[1] if got else []
+
+
+def page_labels_of(root: Path, source_id: str) -> dict[int, str]:
+    """{PDF page: the page number printed on it} for a kept PDF, confirmed labels only (hydra.pagelabels); {} otherwise."""
+    from hydra import pagelabels
+    got = _kept(root, source_id)
+    return pagelabels.labels(got[0], got[1]) if got and got[1] else {}
+
+
+def pages_of_quote(text: str, ranges: list[dict], quote: str) -> str | None:
+    """The page ("14") or pages ("14-15", when the quote runs over a page break) where `quote` stands, found with
+    the normalisation `verbatim` uses; None when it is not found or the source has no pages."""
+    q = _norm(quote)
+    if not ranges or not q:
+        return None
+    pages = [(r["page"], _norm(text[r["start"]:r["end"]])) for r in ranges]
+    for n, t in pages:
+        if q in t:
+            return str(n)
+    for (n1, t1), (n2, t2) in zip(pages, pages[1:]):
+        if q in t1 + " " + t2:
+            return f"{n1}-{n2}"
     return None
 
 
@@ -220,7 +466,8 @@ def read(root: Path, source: str, offset: int = 0, find: list[str] | None = None
     if text is None:
         raise IngestError(f"no kept source '{source}' with text (fetch_source keeps one; `sources` in get_records)")
     if not find:
-        return {"source_id": source, **_part(text, offset)}
+        ranges = page_ranges_of(root, source)
+        return {"source_id": source, **_part(text, offset), **({"page_ranges": ranges} if ranges else {})}
     words = [w.lower() for w in find if w.strip()]
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'“(])|\n+", text)
     hits = [s.strip() for s in sentences if any(w in s.lower() for w in words)]
@@ -297,11 +544,16 @@ def footnotes(url: str, quote: str) -> dict:
 
 # ---- quotes
 
-_FOLD = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-", " ": " "})
+_FOLD = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201b": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"',
+                       "\u201e": '"', "\u00ab": '"', "\u00bb": '"', "\u2010": "-", "\u2011": "-", "\u2012": "-",
+                       "\u2013": "-", "\u2014": "-", "\u2015": "-", "\u2212": "-", "\u00ad": None,
+                       "\u00a0": " ", "\u202f": " ", "\u2009": " ", "\u200b": None})
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", str(s).translate(_FOLD)).strip()
+    """Comparison form: NFC, typographic quotes/apostrophes and dashes plain, every kind of space one space."""
+    import unicodedata
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", str(s)).translate(_FOLD)).strip()
 
 
 def verbatim(note: str, texts: list[str]) -> bool:

@@ -31,6 +31,7 @@ KINDS = {
     "cft": ["CallForTenders"], "ctr": ["Contract"], "lic": ["License"], "nte": ["Note"],
     "doc": ["Document", "Pages", "Article", "Artifact", "Audio", "Email", "Folder", "HyperText", "Image",
             "Message", "Package", "PlainText", "Table", "Video", "Workbook"],
+    "pla": ["Place"], "fea": ["Feature"],             # geo: hydra.geo.bind derives a Feature's from its shape
 }
 # Relationships: the schema is the fact, so one code each (a refinement shares its parent's).
 LINKS = {
@@ -40,6 +41,7 @@ LINKS = {
     "occ": ["Occupancy"], "own": ["Ownership"], "pay": ["Payment"], "plc": ["Placement"], "pst": ["Post"],
     "prp": ["ProjectParticipant"], "rep": ["Representation"], "san": ["Sanction"], "sim": ["Similar"],
     "suc": ["Succession"], "txr": ["TaxRoll"], "unk": ["UnknownLink"],
+    "sit": ["GeoLink"],
 }
 SUBPART = ("Page",)                                    # never an id of its own: `<document id>~p3`
 ABSTRACT = ("Analyzable", "Interest", "Interval", "Thing", "Value")

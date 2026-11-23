@@ -38,7 +38,7 @@ Records are FollowTheMoney JSON, a list of objects, every value a list of string
 - `schema` is an FtM type; `properties` only that type's fields. Leave `id` out: one is made.
 - A link (a relationship's two ends, `organization`, `involved`...) is the linked entity's exact
   `name`, as written in its own record or in the archive. Never an id.
-- No `sources` (the evidence is added for you), no images, no empty values.
+- No `sources` when you give `save` a `source` (file, text or kept id): that evidence is added for you. A batch from several fetched pages gives no `source` and cites on each record `"sources": ["doc-..."]`. No images, no empty values.
 
 ## Only what the text states
 - Record facts the text states. Never add what you know from elsewhere, and never infer a
@@ -115,6 +115,29 @@ Records are FollowTheMoney JSON, a list of objects, every value a list of string
 - An address goes in the entity's `address`, as written. Make an Address record (its `name` and `full`
   set to the address as written, linked through `addressEntity`) only when several entities share it.
 
+## Where things are (geo)
+- Where an entity is, is never a field you add to it: no coordinates, OSM ids or shapes on a person,
+  company or property. Say where it is with `site`: it writes a geometry (a Feature) and a GeoLink that
+  links the entity to it, with a `role` (footprint, boundary, building, grounds, entrance, access,
+  location, seat, jurisdiction, home, posting, base, route, residence, born, died, buried, event, label) and dates.
+- An OSM id (`osm:way/123`) belongs to a geometry only; a Wikidata id to the entity. OSM tags are copied
+  as written (`building=house`), and OSM's own `wikidata=` tag stays a tag.
+- A named place the text gives (a town, a region) is a Place. Find it with `geo_resolve` (a point, or the
+  name inside the entity's country) and site the entity at it with `{"register": key}`: hydra makes the
+  Place with its keys and draws its real outline. A city or town is its own Place, never the region of the
+  same name ("Riyadh" is the city unless the text says region or province). Only when the register lacks
+  it, save a Place keyed by the id the source gives (`upstream: wikidata:Q…`).
+- Prefer the finest place the text states: a building or address over a town, a town over a region, a
+  region over a country. A country alone draws nothing for most entries.
+- Points are [longitude, latitude]. Only places the source states or the person confirms: never place an
+  entity by a name alone; when a name could be several places, ask.
+- A post has one place per aspect: `home` (whose post it is), `posting` (the host country), `seat` (the
+  building), `jurisdiction` (a region, then a district). `geo_aspects` shows what fills each and what the
+  register offers for the empty ones; fill one aspect at a time with `site`. A new place the person points at
+  is a point, never a box.
+- Which place an entity is drawn by first follows geo.yaml; to change it, propose `set_primary` and use it
+  only once the person agrees.
+
 ## Dates
 - Only dates the text gives, as `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. "In 2019" is `2019`; don't
   expand it to a full date. A vague date stays vague: `c. 1748`, `before 1800`, `after 1900`,
@@ -129,6 +152,8 @@ Records are FollowTheMoney JSON, a list of objects, every value a list of string
 - Merges, ambiguous links and placements: hydra turns them into questions (`open_questions`).
   Explain each with `explain_entity` and propose an answer; `answer` only with the person's
   agreement. Don't try to settle them by changing the data.
+- A post, job or membership with a start and no end: never guess an end date into the record. `open_ends`
+  lists them with candidates and their sources; `answer` one only with the person's agreement.
 - The rank ladder: when many roles take no position, propose one with `set_positions` (it previews
   what it would rank) and write it only once the person agrees.
 """

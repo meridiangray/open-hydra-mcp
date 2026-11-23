@@ -1,7 +1,7 @@
 """Keep the tool tables in the docs equal to the tools server.py registers.
 
-Reads server.py with `ast` (no mcp install needed), builds a Markdown table of
-every `@mcp.tool()` function, and rewrites the text between
+Imports the server and lists its registered tools, builds a Markdown table of
+every one, and rewrites the text between
 
     <!-- tools:start -->  and  <!-- tools:end -->
 
@@ -21,16 +21,13 @@ START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 
 def tools() -> list[tuple[str, list[str], str]]:
-    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
-    out = []
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if not any(ast.unparse(d).startswith("mcp.tool") for d in node.decorator_list):
-            continue
-        args = [a.arg for a in node.args.args]
-        out.append((node.name, args, ast.get_docstring(node) or ""))
-    return out
+    """Every registered tool (server.py and the modules that register onto it), in name order."""
+    import asyncio
+    sys.path.insert(0, str(ROOT / "src"))
+    from hydra_mcp import server
+    found = asyncio.run(server.mcp.list_tools())
+    return [(t.name, list(t.inputSchema.get("properties", {})), t.description or "")
+            for t in sorted(found, key=lambda t: t.name)]
 
 
 def first_sentence(doc: str) -> str:
@@ -40,9 +37,10 @@ def first_sentence(doc: str) -> str:
 
 
 def table() -> str:
-    rows = ["| Tool | Arguments | What it does |", "|---|---|---|"]
+    from hydra_mcp.toolsets import TOOL_SET
+    rows = ["| Tool | Set | Arguments | What it does |", "|---|---|---|---|"]
     for name, args, doc in tools():
-        rows.append(f"| `{name}` | {', '.join(f'`{a}`' for a in args)} | {first_sentence(doc)} |")
+        rows.append(f"| `{name}` | {TOOL_SET.get(name, '')} | {', '.join(f'`{a}`' for a in args)} | {first_sentence(doc)} |")
     return "\n".join(rows)
 
 

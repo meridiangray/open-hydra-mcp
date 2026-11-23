@@ -130,3 +130,77 @@ def test_set_positions_previews_what_it_ranks(archive, tmp_path):
     assert pre["roles_ranked"]["Chair"] == 1 and not (archive / layout.POSITIONS).read_text(encoding="utf-8").count("Chair")
     done = agent.set_positions(archive, ladder, confirm=True)
     assert "Chair" in (archive / layout.POSITIONS).read_text(encoding="utf-8") and done["snapshot"]
+
+
+def test_decisions_list_what_was_answered_and_clear_takes_it_back(archive, tmp_path):
+    core.ingest(archive, [P("Person", name="Di Moss")], text(tmp_path, "a.txt", "Di Moss."), "a")
+    core.ingest(archive, [P("Person", name="Di Moss", birthDate="1981")], text(tmp_path, "b.txt", "Di Moss, 1981."), "b")
+    (merge,) = agent.open_questions(archive, "merges")["questions"]
+    assert agent.decisions(archive)["count"] == 0
+    agent.answer(archive, merge["id"], "confirm", confirm=True)
+    (d,) = agent.decisions(archive)["decisions"]
+    assert d["kind"] == "merge" and d["answer"] == "The same entity" and "Di Moss" in d["question"]
+    assert agent.decisions(archive, "place")["count"] == 0
+    with pytest.raises(core.IngestError):
+        agent.decisions(archive, "nonsense")
+    agent.answer(archive, d["id"], "clear", confirm=True)
+    assert agent.decisions(archive)["count"] == 0 and len(persons(archive, "Di Moss")) == 2
+
+
+def test_symbology_reads_and_sets_a_link_colour_only_when_confirmed(archive, tmp_path):
+    core.ingest(archive, [P("Person", name="Ed Pike"), P("Company", name="Pike Ltd"),
+                          P("Directorship", director="Ed Pike", organization="Pike Ltd", role="director")],
+                text(tmp_path, "a.txt", "Ed Pike directs Pike Ltd."), "a")
+    s = agent.symbology(archive)
+    assert {t["key"] for t in s["types"]} >= {"Person", "Company"} and s["icons"]
+    assert not any("svg" in i for i in s["icons"])                      # tokens, not pictures
+    with pytest.raises(core.IngestError):
+        agent.set_symbology(archive, "link-colour", "Directorship", "red")
+    with pytest.raises(core.IngestError):
+        agent.set_symbology(archive, "type-icon", "Person", "no-such-icon")
+    conf = archive / "wiki.yaml"
+    said = lambda: conf.read_text(encoding="utf-8") if conf.is_file() else ""
+    pre = agent.set_symbology(archive, "link-colour", "Directorship", "#aa3300")
+    assert "next" in pre and pre["to"] == "#aa3300" and "aa3300" not in said()      # a preview writes nothing
+    done = agent.set_symbology(archive, "link-colour", "Directorship", "#aa3300", confirm=True)
+    assert "link_colours" in done["written"]
+    assert next(x for x in agent.symbology(archive)["links"] if x["key"] == "Directorship")["colour"] == "#aa3300"
+    assert history.log(archive)[0]["author"] == "agent:hydra-mcp"
+
+
+def test_save_changes_previews_then_saves(archive, tmp_path):
+    core.ingest(archive, [P("Person", name="Di Moss")], text(tmp_path, "s.txt", "Di Moss."), "a")
+    prev = agent.save_changes(archive, "Add Di Moss")
+    assert "next" in prev and prev["steps"] >= 1 and any(e["name"] == "Di Moss" for e in prev["entities"])
+    from hydra import history
+    assert history.last_save(archive) is None
+    done = agent.save_changes(archive, "Add Di Moss", "from s.txt", confirm=True)
+    s = history.snap(archive, done["saved"])
+    assert s["kind"] == "save" and s["author"].startswith("agent:hydra-mcp") and s["fields"]["description"] == "from s.txt"
+
+
+def test_open_ends_list_candidates_and_an_answer_is_a_judgement_not_an_endDate(archive, tmp_path):
+    core.ingest(archive, [P("Person", name="Ann Lee", birthDate="1930", deathDate="1999-05"),
+                          P("Person", name="Ben Roe", birthDate="1950"), P("Position", name="Chair of Lee Ltd"),
+                          P("Occupancy", holder="Ann Lee", post="Chair of Lee Ltd", startDate="1980"),
+                          P("Occupancy", holder="Ben Roe", post="Chair of Lee Ltd", startDate="1990")],
+                text(tmp_path, "a.txt", "Ann Lee chaired Lee Ltd from 1980; Ben Roe from 1990."), "a")
+    got = agent.open_ends(archive)
+    ann = next(x for x in got["open_ends"] if x["who"] == "Ann Lee")
+    assert {c["kind"] for c in ann["candidates"]} == {"death", "successor"} and ann["answers"] == ["holds", "unknown"]
+    assert {x["who"] for x in agent.open_ends(archive, "Ben Roe")["open_ends"]} == {"Ben Roe"}
+    with pytest.raises(core.IngestError):
+        agent.open_ends(archive, "Nobody")
+    death = next(c for c in ann["candidates"] if c["kind"] == "death")["choice"]
+    pre = agent.answer(archive, ann["id"], death)                        # the existing answer tool takes the end- key
+    assert pre["writes"][ann["id"]]["end"] == "1999-05" and "next" in pre
+    assert not any(k.startswith("end-") for k in (archive / layout.VERDICTS).read_text(encoding="utf-8").split())
+    agent.answer(archive, ann["id"], death, confirm=True)
+    assert all(x["who"] != "Ann Lee" for x in agent.open_ends(archive)["open_ends"])
+    (d,) = [r for r in agent.decisions(archive, "end")["decisions"]]
+    assert d["answer"] == "Until 1999-05"
+    pages = resources.read_jsonl(archive / layout.UNIVERSE_PARSED / "pages.jsonl")
+    rel = next(r for p in pages if p["title"] == "Ann Lee" for r in p["relations"] if r["edge"] == "Occupancy")
+    assert rel["inferred"]["endDate"] == "1999-05" and "endDate" not in rel
+    agent.answer(archive, ann["id"], "clear", confirm=True)
+    assert any(x["who"] == "Ann Lee" for x in agent.open_ends(archive)["open_ends"])

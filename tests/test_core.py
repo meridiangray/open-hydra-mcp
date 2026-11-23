@@ -59,12 +59,41 @@ def test_errors_block_and_name_the_problem(archive):
            {"schema": "Thing", "properties": {"name": "Z"}},
            {"schema": "Person", "properties": {"alias": "No Name"}}]
     errs = " | ".join(core.check_records(archive, bad)["errors"])
-    for part in ("no schema 'Persn'", "has no property 'colour'", "'the nineties' is not a date",
+    for part in ("no schema 'Persn'", "'the nineties' is not a date",
                  "records never carry images", "a Membership needs `organization`", "Thing is abstract",
                  "a Person needs a `name`"):
         assert part in errs, part
     out = core.ingest(archive, bad, {"text": "x"}, "bad")
     assert out["saved"] is False and not (archive / layout.COLLECTIONS_DIR / "bad.json").exists()
+
+
+def test_a_field_outside_ftm_is_a_finding_not_an_error_and_is_kept(archive, tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_CONFIG_DIR", str(tmp_path / "no-config"))             # no Wikidata catalogue here
+    batch = [{"schema": "Person", "properties": {"name": "Y", "colour": "red", "birthDat": "1950", "P1449": "Yo"}}]
+    rep = core.check_records(archive, batch)
+    assert rep["ok"], rep["errors"]
+    assert any("extra field 'colour'" in w for w in rep["warnings"])
+    found = {f["field"]: f for f in rep["extra_fields"]}
+    assert found["colour"]["unassigned"] and found["birthDat"]["nearest"] == "birthDate"
+    assert found["P1449"]["unassigned"] is False
+    rec = rep["records"][0]
+    assert rec["properties"] == {"name": ["Y"]}
+    assert rec["_meta"]["extra"] == {"colour": {"values": ["red"], "wd": None}, "birthDat": {"values": ["1950"], "wd": None},
+                                     "P1449": {"values": ["Yo"], "wd": "P1449"}}
+    out = core.ingest(archive, batch, {"text": "Y"}, "extras")
+    assert out["saved"] and {f["field"] for f in out["extra_fields"]} == {"colour", "birthDat", "P1449"}
+    kept = json.loads((archive / layout.COLLECTIONS_DIR / "extras.json").read_text(encoding="utf-8"))
+    assert kept[0]["_meta"]["extra"]["colour"] == {"values": ["red"], "wd": None}
+    assert "colour" not in kept[0]["properties"]
+    again = core.check_records(archive, kept, collection="extras")              # a saved record round-trips with its extras
+    assert again["ok"] and again["records"][0]["_meta"]["extra"]["colour"]["values"] == ["red"] and not again["extra_fields"]
+
+
+def test_a_p_number_key_goes_to_the_mapped_field(archive):
+    rep = core.check_records(archive, [{"schema": "Person", "properties": {"name": "Z", "P569": "1950-02-03"}}])
+    rec = rep["records"][0]
+    assert rec["properties"]["birthDate"] == ["1950-02-03"] and rec["_meta"]["wd"]["birthDate"] == "P569"
+    assert "extra" not in rec["_meta"] and rep["ok"]
 
 
 def test_approximate_dates_keep_their_qualifier(archive):
