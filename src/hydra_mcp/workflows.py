@@ -1,6 +1,6 @@
 """workflows.py — guides, tracked tasks, views, and CLI orientation tools for hydra-mcp.
 
-Thin over `hydra.guides`, `hydra.workflows`, `hydra.tasks`, `hydra.wiki.viewcheck`, `hydra.tree`,
+Thin over `hydra.agents.guides`, `hydra.agents.workflows`, `hydra.agents.tasks`, `hydra.wiki.views.viewcheck`, `hydra.structure.tree`,
 `hydra.wiki.manage`, `hydra.cli.details`, and `hydra.cli.check`.
 
 Each server process is one session with its own holder name (`agent:hydra-mcp#k3f9`, or
@@ -11,13 +11,23 @@ sources they keep. A task held by another holder refuses this session's steps.
 from __future__ import annotations
 
 import json
-import random
+import sys
 from pathlib import Path
 
-from hydra_mcp import core
-from hydra_mcp.core import AGENT, IngestError
+from mcp.types import CallToolResult, TextContent
 
-from hydra import tasks as _tasks
+from hydra import __version__
+from hydra.structure import tree as htree
+from hydra.agents import contexts, guides, tasks, workflows, tasks as _tasks
+from hydra.records import query
+from hydra.schema import loader as schema
+from hydra.archive import layout, writelock
+from hydra.cli import check as hcheck, details as hdetails, positions as pcli
+from hydra.review import verdicts as vd
+from hydra.structure import fold
+
+from hydra_mcp import core, pipeline, stale
+from hydra_mcp.core import AGENT, IngestError
 
 SESSION = _tasks.PROCESS_ID                       # 4 hex per server process
 _CURRENT_TASK: dict[str, str] = {}
@@ -29,7 +39,7 @@ def client_name() -> str | None:
     global _CLIENT
     if _CLIENT is None:
         try:
-            from hydra_mcp import server
+            from hydra_mcp import server  # lazy: cycle
             _CLIENT = server.mcp.get_context().session.client_params.clientInfo.name or None
         except Exception:
             return None
@@ -49,7 +59,6 @@ def _holder(root: Path, name: str | None = None) -> str:
 
 def _warned(got, msg: str):
     """A read-only tool's answer with a top-level `warning`: in the structured result, and in its text."""
-    from mcp.types import TextContent
     if isinstance(got, dict):
         return {**got, "warning": msg}
     if isinstance(got, tuple) and len(got) == 2 and isinstance(got[1], dict):
@@ -71,15 +80,12 @@ def install_write_lock(mcp) -> None:
     """Wrap every tool call: a call that writes takes the archive's write lock (one writer at a time; a second
     waits a few seconds, then gets {error: "busy", why, do}), and every failure of any tool reaches the client as
     `{error, why, do}` (see `failure_payload`). This is the one place the error shape is made."""
-    from hydra import writelock
-    from hydra_mcp import core, stale                  # stale notes the code this server starts with
     mgr = mcp._tool_manager
     inner = mgr.call_tool
 
     def reply(payload, kw):
         if not kw.get("convert_result"):
             return payload
-        from mcp.types import CallToolResult, TextContent
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))], isError=True)
 
     async def call_tool(name, arguments, *a, **kw):
@@ -170,13 +176,18 @@ ALWAYS_WRITES = {"save", "fetch_source", "universe_build", "task_checkout", "tas
                  "task_step", "task_release", "task_close"}
 
 
+def _known_errors() -> tuple:
+    """The errors a tool reports as its own. `viewcheck` loads on first use (start-up), and only once it is loaded
+    can its ViewError be raised."""
+    vc = sys.modules.get("hydra.wiki.views.viewcheck")
+    return (guides.GuideError, workflows.WorkflowError, tasks.TaskError, contexts.ContextError,
+            *((vc.ViewError,) if vc else ()))
+
+
 def _wrap(fn, *a, **kw):
-    from hydra import contexts, guides, tasks, workflows
-    from hydra.wiki import viewcheck
     try:
         return fn(*a, **kw)
-    except (guides.GuideError, workflows.WorkflowError, tasks.TaskError, viewcheck.ViewError,
-            contexts.ContextError) as e:
+    except _known_errors() as e:
         raise IngestError(str(e), kind=type(e).__name__) from None
     except SystemExit as e:
         raise IngestError(str(e.code).removeprefix("hydra: "), kind="SystemExit") from None
@@ -188,7 +199,6 @@ def current_task(root: Path) -> str | None:
     tid = _CURRENT_TASK.get(key)
     if not tid:
         return None
-    from hydra import tasks
     try:
         info = tasks.get_task(root, tid)
     except tasks.TaskError:
@@ -204,7 +214,6 @@ def hook_source(root: Path, source_id: str, note: str = "") -> None:
     tid = current_task(root)
     if not tid or not source_id:
         return
-    from hydra import tasks
     try:
         tasks.record_source(root, tid, source_id, note=note)
     except Exception:
@@ -216,7 +225,6 @@ def hook_unsource(root: Path, source_id: str) -> None:
     tid = current_task(root)
     if not tid or not source_id:
         return
-    from hydra import tasks
     try:
         p, task = tasks._read(root, tid)
         had = list(task["meta"].get("sources") or ())
@@ -231,7 +239,6 @@ def hook_log(root: Path, message: str) -> None:
     tid = current_task(root)
     if not tid or not message:
         return
-    from hydra import tasks
     try:
         tasks.log_action(root, tid, message)
     except Exception:
@@ -242,13 +249,10 @@ def hook_log(root: Path, message: str) -> None:
 
 def guide(topic: str | None = None, section: str | None = None, archive: str | None = None) -> dict:
     """The guide, with `hydra_version`: the version of hydra that wrote it."""
-    from hydra import __version__
     return {"hydra_version": __version__, **_guide(topic, section, archive)}
 
 
 def _guide(topic, section, archive) -> dict:
-    from hydra import guides
-    from hydra_mcp import core
     root = None
     if archive:
         try:
@@ -273,7 +277,6 @@ def _guide(topic, section, archive) -> dict:
 
 def _context_guides(root) -> list[dict]:
     """The contexts as guide topics (`context/<name>`), listed beside the workflows."""
-    from hydra import contexts, guides
     out = []
     for c in _wrap(contexts.list_contexts, root):
         d = guides._parse(f"context/{c['name']}", contexts.render_context(c["name"], root))
@@ -284,7 +287,6 @@ def _context_guides(root) -> list[dict]:
 
 def _context_guide(norm: str, section, root) -> dict:
     """`guide("context/<name>")`: the context's brief, rendered like a workflow's guide."""
-    from hydra import contexts, guides
     name = norm.split("/", 1)[1]
     try:
         parsed = guides._parse(norm, contexts.render_context(name, root))
@@ -300,7 +302,7 @@ def _context_guide(norm: str, section, root) -> dict:
 
 def _tool_lines() -> str:
     """Every registered tool with the first sentence of its description, so this list cannot go stale."""
-    from hydra_mcp import server
+    from hydra_mcp import server  # lazy: cycle
     mgr = getattr(server.mcp, "_tool_manager", None)
     tools = getattr(mgr, "_tools", {}) if mgr else {}
     lines = ["## Every tool", ""]
@@ -312,7 +314,6 @@ def _tool_lines() -> str:
 
 
 def workflows_list(root: Path | None = None) -> dict:
-    from hydra import workflows
     return {"workflows": _wrap(workflows.list_workflows, root)}
 
 
@@ -320,7 +321,6 @@ def workflows_list(root: Path | None = None) -> dict:
 
 def list_tasks(root: Path, status: str | None = None, workflow: str | None = None,
                collection: str | None = None, offset: int = 0, limit: int = 100) -> dict:
-    from hydra import tasks
     cur = current_task(root)
     rows, paging = core.page(_wrap(tasks.list_tasks, root, status=status, workflow=workflow, collection=collection),
                              offset, limit)
@@ -330,21 +330,24 @@ def list_tasks(root: Path, status: str | None = None, workflow: str | None = Non
 def task_new(root: Path, title: str, workflow: str | list[str] | None = None, collection: str | None = None,
              views: list[str] | None = None, subjects: list[str] | None = None, confirm: bool = False,
              authorized: list[str] | None = None, context: str | None = None) -> dict:
-    from hydra import tasks
     return _wrap(tasks.create_task, root, title, workflow, collection, views_as_list(views), subjects, confirm,
                  _holder(root), authorized, context)
 
 
 def contexts_list(root: Path, task: str | None = None, words: str = "") -> dict:
     """The contexts: ranked for a task (or for `words`), or the plain list with each `use_when`."""
-    from hydra import contexts
     if task or words:
-        return {"contexts": _wrap(contexts.rank_contexts, root, task, words)}
+        meta = None                                  # rank_contexts takes the task's meta, not its id
+        if task:
+            try:
+                meta = tasks._read(root, task)[1]["meta"]
+            except tasks.TaskError:
+                meta = {}
+        return {"contexts": _wrap(contexts.rank_contexts, root, meta, words)}
     return {"contexts": _wrap(contexts.list_contexts, root)}
 
 
 def context_checkout(root: Path, task_id: str, name: str, reason: str, confirm: bool = False) -> dict:
-    from hydra import tasks
     return _wrap(tasks.set_context, root, _task_id(root, task_id), name, reason, confirm, _holder(root))
 
 
@@ -352,17 +355,32 @@ BRIEF_MAX = 2500                                     # chars of a context's brie
 
 
 def _brief(root: Path, name: str) -> dict:
-    from hydra import contexts
     text = contexts.render_context(name, root)
     if len(text) <= BRIEF_MAX:
         return {"brief": text}
     return {"brief": f"long: read it with guide(\"context/{name}\")"}
 
 
+CHECKOUT_DROP = ("guides", "model", "client", "since", "last_activity", "idle", "stale", "start_snapshot",
+                 "end_snapshot", "file", "sources", "cited_sources", "uncited_sources", "claims", "sections")
+
+
+def _short_checkout(out: dict) -> dict:
+    """A checkout's short reply: id, title, route, counts, next_step, the steps' codes only (a done one marked),
+    the last 3 log lines. `details=true` (or `task()`) gives every step's text and the rest."""
+    short = {k: v for k, v in out.items() if k not in CHECKOUT_DROP}
+    if isinstance(out.get("steps"), list):
+        short["steps"] = [s.get("code") + (f" [{s['status']}]" if s.get("status") not in (None, "open") else "")
+                          for s in out["steps"] if s.get("kind", "step") == "step"]
+    if out.get("log"):
+        short["log"] = out["log"][-3:]
+    short["more"] = "task_checkout(details=true) or task() gives every step's text and the whole task"
+    return short
+
+
 def task_checkout(root: Path, task_id: str, holder: str | None = None, force: bool = False,
                   reason: str = "", details: bool = False, model: str | None = None,
                   client: str | None = None) -> dict:
-    from hydra import tasks
     who = _holder(root, holder)
     out = _wrap(tasks.checkout_task, root, task_id, holder=who, force=force, reason=reason,
                 model=model, client=client)
@@ -393,11 +411,8 @@ def task_checkout(root: Path, task_id: str, holder: str | None = None, force: bo
     except Exception:
         pass
     out["guides_to_load"] = out["guides"]
-    if not details and isinstance(out.get("steps"), list):   # the checklist as one line a step; `task()` has it all
-        out["steps"] = [f"{s.get('code')} {s.get('text')}" + (f" [{s['status']}]" if s.get("status") not in (None, "open") else "")
-                        for s in out["steps"] if s.get("kind", "step") == "step"]
-        if out.get("log"):
-            out["log"] = out["log"][-3:]
+    if not details:
+        out = _short_checkout(out)
     if out.get("needs_context"):
         out["next"] = ("this task has no context: call `contexts(task)`, choose one with the person through "
                        "`context_checkout` (or `general` when unattended), then do next_step")
@@ -413,7 +428,6 @@ def _task_id(root: Path, task_id: str | None) -> str:
     cur = current_task(root)
     if cur:
         return cur
-    from hydra import tasks
     sole = tasks.active_task_id(root)
     if sole:
         return sole
@@ -421,7 +435,6 @@ def _task_id(root: Path, task_id: str | None) -> str:
 
 
 def task_show(root: Path, task_id: str | None = None) -> dict:
-    from hydra import tasks
     return _wrap(tasks.get_task, root, _task_id(root, task_id))
 
 
@@ -437,16 +450,22 @@ def _tick_reply(out: dict) -> dict:
     return short
 
 
+def _check_view():
+    """The wiki's view check, handed to the task functions that run a step's `verify:` hook (tasks.py takes it from
+    its front ends: it may not import the wiki)."""
+    from hydra.wiki.views import viewcheck  # lazy: startup
+    return viewcheck.check_view
+
+
 def task_step(root: Path, step: str, status: str = "done", result: str = "", reason: str = "",
               claim: str | None = None, evidence: list[str] | None = None,
               subject: str | None = None, task_id: str | None = None, verify: bool = True,
               exit: str | None = None) -> dict:
-    from hydra import tasks
     tid = _task_id(root, task_id)
     try:
         out = _wrap(tasks.step_task, root, tid, step, status=status, result=result, reason=reason,
                     claim=claim, evidence=evidence, subject=subject, holder=_holder(root), verify=verify,
-                    exit=exit)
+                    exit=exit, check_view=_check_view())
         return _tick_reply(out)
     except IngestError as e:
         if "still finds:" in str(e):                 # the step's check found warnings: say how to go on, not "call tasks()"
@@ -457,18 +476,15 @@ def task_step(root: Path, step: str, status: str = "done", result: str = "", rea
 
 def task_add(root: Path, subject: str | None = None, step: str | None = None, block: str | None = None,
              code: str | None = None, task_id: str | None = None) -> dict:
-    from hydra import tasks
     tid = _task_id(root, task_id)
     return _wrap(tasks.add_to_task, root, tid, subject=subject, step=step, block=block, code=code)
 
 
 def task_verify(root: Path, task_id: str | None = None) -> dict:
-    from hydra import tasks
-    return _wrap(tasks.verify_task, root, _task_id(root, task_id))
+    return _wrap(tasks.verify_task, root, _task_id(root, task_id), _check_view())
 
 
 def task_release(root: Path, task_id: str | None = None, force: bool = False) -> dict:
-    from hydra import tasks
     tid = _task_id(root, task_id)
     out = _wrap(tasks.release_task, root, tid, holder=_holder(root), force=force)
     _CURRENT_TASK.pop(str(Path(root).resolve()), None)
@@ -477,9 +493,9 @@ def task_release(root: Path, task_id: str | None = None, force: bool = False) ->
 
 def task_close(root: Path, status: str = "done", summary: str = "", task_id: str | None = None,
                force: bool = False) -> dict:
-    from hydra import tasks
     tid = _task_id(root, task_id)
-    out = _wrap(tasks.close_task, root, tid, status=status, summary=summary, holder=_holder(root), force=force)
+    out = _wrap(tasks.close_task, root, tid, status=status, summary=summary, holder=_holder(root), force=force,
+                check_view=_check_view())
     _CURRENT_TASK.pop(str(Path(root).resolve()), None)
     return out
 
@@ -487,7 +503,7 @@ def task_close(root: Path, status: str = "done", summary: str = "", task_id: str
 # ---- views & CLI-parity read tools ---------------------------------------------------
 
 def collections(root: Path) -> dict:
-    from hydra.wiki import viewcheck
+    from hydra.wiki.views import viewcheck  # lazy: startup
     return {"collections": _wrap(viewcheck.collections_overview, root)}
 
 
@@ -511,7 +527,7 @@ def views_as_list(views) -> list[str] | None:
 
 def set_collection_views(root: Path, collection: str, views: dict | None = None, confirm: bool = False,
                          title: str | None = None) -> dict:
-    from hydra.wiki import viewcheck
+    from hydra.wiki.views import viewcheck  # lazy: startup
     out = _wrap(viewcheck.set_collection_views, root, collection, views_as_map(views), confirm=confirm, who=AGENT, title=title)
     if confirm:
         hook_log(root, f"set_collection_views {collection}: {out['enabled']}")
@@ -519,25 +535,21 @@ def set_collection_views(root: Path, collection: str, views: dict | None = None,
 
 
 def view_config(root: Path, collection: str | None = None) -> dict:
-    from hydra.wiki import viewcheck
+    from hydra.wiki.views import viewcheck  # lazy: startup
     return _wrap(viewcheck.view_config, root, collection)
 
 
 def view_check(root: Path, view: str, collection: str | None = None) -> dict:
-    from hydra.wiki import viewcheck
+    from hydra.wiki.views import viewcheck  # lazy: startup
     return _wrap(viewcheck.check_view, root, view, collection)
 
 
 def tree(root: Path, kind: str | None = None, search: str | None = None,
          read: str = "declared", format: str = "text") -> dict:
-    from hydra import query, resources, schema, tree as htree
     if read not in htree.READS:
         raise IngestError(f"read must be one of: {', '.join(htree.READS)}")
     if format not in ("text", "json"):
         raise IngestError("format must be 'text' or 'json'")
-    from hydra import layout
-    from hydra.review import verdicts as vd
-    from hydra.structure import fold
     schema.load(root=root)
     ir, _ = _wrap(htree._load, root, read)
     words = [x for x in (kind, search) if x]
@@ -557,8 +569,6 @@ def tree(root: Path, kind: str | None = None, search: str | None = None,
 
 
 def positions(root: Path, mode: str = "both", with_nodes: bool = False, read: str = "declared") -> dict:
-    from hydra import tree as htree
-    from hydra.cli import positions as pcli
     if mode not in ("both", "tree", "unplaced"):
         raise IngestError("mode must be one of: both, tree, unplaced")
     if read not in pcli.READS:
@@ -576,8 +586,8 @@ def positions(root: Path, mode: str = "both", with_nodes: bool = False, read: st
 
 
 def badges(root: Path) -> dict:
-    from hydra.wiki import manage, org as worg
-    from hydra_mcp import pipeline
+    from hydra.wiki import manage  # lazy: startup
+    from hydra.wiki.views import org as worg  # lazy: startup
     w = pipeline._wiki(root)
     report = manage.badge_report(w)
     post = w.reg.roles.POST
@@ -589,12 +599,10 @@ def badges(root: Path) -> dict:
 
 
 def details(root: Path) -> dict:
-    from hydra.cli import details as hdetails
     return _wrap(hdetails.collect, root)
 
 
 def check(root: Path) -> dict:
-    from hydra.cli import check as hcheck
     issues = _wrap(hcheck.run, root)
     extra, built, stands = _wrap(hcheck.last_build, root, issues)
     return {"issues": issues, "last_build_extra": extra, "build_stands": stands,

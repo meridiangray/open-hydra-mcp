@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import json
+from hydra.agents import workflows as hw
+from hydra_mcp import config, core
+from mcp.server.lowlevel.server import NotificationOptions
+from mcp.types import CallToolResult, TextContent
 
 DEFAULT = "core"
 ENV = "HYDRA_MCP_TOOLSETS"
@@ -21,7 +26,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "amend_records", "find_entities", "explain_entity", "read_file", "source_profile", "source_outline",
         "source_names", "read_source", "sources", "cite",
         "labelling_guidelines", "vocabularies", "keys", "collections", "collection_create", "recipe", "paths",
-        "toolsets", "toolset_enable", "extra_fields", "field_assign"),
+        "toolsets", "toolset_enable", "toolset_disable", "tool_on", "tool_off", "extra_fields", "field_assign"),
     "enrich": (
         "fetch_source", "drop_source", "swap_source", "source_report", "wikipedia_footnotes", "read_page", "probe",
         "suggestions", "apply_suggestion", "dismiss_suggestion", "suggestions_reset", "enrichers", "enrichments",
@@ -29,6 +34,8 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "graduate_stub", "pin_upstream", "open_questions", "answer", "decisions", "open_ends", "neighbors", "cast"),
     "wikidata": (                                      # link entries to Wikidata as questions for the person (owner, 2026-11-21)
         "wikidata_questions", "wikidata_answer", "wikidata_status"),
+    "checks": (                                        # read-only reviewers for a trailing check (lag-check plan, LC4)
+        "check_values", "check_rules", "check_graph", "source_page_image"),
     "geo": (
         "geo_aspects", "geo_contexts", "geo_enable", "geo_locate", "geo_measure", "geo_query",
         "geo_register_status", "geo_report", "geo_resolve", "geo_summarize", "draw_feature", "move_feature",
@@ -64,6 +71,9 @@ class _State:
     def __init__(self, mcp):
         self.all = dict(mcp._tool_manager._tools)      # every tool, on or off
         self.version = 0                               # bumped whenever the list changes
+        self.flag: str | None = None                   # the start flag (`--toolsets`), which overrides the files
+        self.archive: str | None = None                # the last archive a call named: its mcp.yaml is layered on
+        self.stamp = config.stamps()                   # the config files as last applied
 
 
 def _state(mcp) -> _State:
@@ -121,13 +131,72 @@ def startup_spec(arg: str | None = None) -> str:
     return arg or os.environ.get(ENV) or DEFAULT
 
 
+def apply_resolved(mcp, res: dict) -> bool:
+    """Make the tool list exactly a resolved configuration's (`config.resolve`); True when it changed."""
+    st, tools = _state(mcp), mcp._tool_manager._tools
+    keep = set(res["tools"])
+    before = set(tools)
+    for t in list(tools):
+        if t in TOOL_SET and t not in keep:
+            del tools[t]
+    for t in keep:
+        if t in st.all:
+            tools[t] = st.all[t]
+    changed = set(tools) != before
+    if changed:
+        st.version += 1
+    return changed
+
+
+def start(mcp, flag: str | None = None) -> dict:
+    """Start-up: the files' list, with the flag (else env) over them."""
+    st = _state(mcp)
+    st.flag = flag
+    st.stamp = config.stamps()
+    res = config.resolve(spec=flag)
+    apply_resolved(mcp, res)
+    st.version += 1
+    return res
+
+
+def refresh(mcp, archive=None) -> bool:
+    """Before each call: one stat per config file; when a stamp changed (or a call names an archive whose mcp.yaml
+    exists), re-resolve and apply, so the tool list follows the file. True when the list changed."""
+    st = _state(mcp)
+    arch = archive if isinstance(archive, str) and archive else st.archive
+    try:
+        now = config.stamps(arch)
+    except Exception:
+        return False
+    if now == st.stamp:
+        return False
+    st.stamp, st.archive = now, arch
+    return apply_resolved(mcp, config.resolve(arch, spec=st.flag))
+
+
+def _changed_result(mcp, res: dict) -> dict:
+    return {"toolsets": res["toolsets"], "tools_on": res["on"], "tools_off": res["off"], "locked": res["locked"],
+            "tools": res["tools"]}
+
+
+def change(mcp, action: str, name: str, archive=None) -> dict:
+    """The MCP tools' work: edit the machine file (or the archive's) and apply it now. Raises config.ConfigError."""
+    arch = None
+    if archive:
+        arch = str(core.open_archive(archive))
+    res = config.edit(action, name, arch)
+    st = _state(mcp)
+    st.stamp, st.archive = config.stamps(arch), arch or st.archive
+    apply_resolved(mcp, config.resolve(st.archive, spec=st.flag))
+    return _changed_result(mcp, res)
+
+
 def sets_for_tools(tools) -> list[str]:
     return list(dict.fromkeys(TOOL_SET[t] for t in tools if t in TOOL_SET))
 
 
 def route_tools(root, task: dict) -> list[str]:
     """The tools a task's route needs: each step's `tool` in its workflows, plus its views' blocks."""
-    from hydra import workflows as hw
     out: list[str] = []
     views = list(task.get("views") or ())
     for i, name in enumerate(task.get("route") or ([task["workflow"]] if task.get("workflow") else []), 1):
@@ -143,8 +212,9 @@ def route_tools(root, task: dict) -> list[str]:
 def enable_for_task(mcp, root, task: dict) -> list[str]:
     """Switch on the sets a task's route needs; returns the set names that were switched on now."""
     newly = []
+    locked = config.locked_sets(root)
     for s in sets_for_tools(route_tools(root, task)):
-        if not set_on(mcp, s) and enable(mcp, s):
+        if s not in locked and not set_on(mcp, s) and enable(mcp, s):
             newly.append(s)
     return newly
 
@@ -161,24 +231,22 @@ def install(mcp) -> None:
 
     def init_options(notification_options=None, *a, **kw):
         if notification_options is None:
-            from mcp.server.lowlevel.server import NotificationOptions
             notification_options = NotificationOptions(tools_changed=True)
         return make(notification_options, *a, **kw)
     low.create_initialization_options = init_options
 
     async def call_tool(name, arguments, *a, **kw):
-        if name not in mgr._tools and name in TOOL_SET:
-            s = TOOL_SET[name]
-            payload = {"error": "tool not on", "why": f"{name} is in the {s} toolset, which is off",
-                       "do": f'toolset_enable("{s}")'}
-            if not kw.get("convert_result"):
-                return payload
-            import json
-            from mcp.types import CallToolResult, TextContent
-            return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
-                                  isError=True)
         before = mcp._hydra_toolsets.version
+        refresh(mcp, (arguments or {}).get("archive"))      # a config file changed: apply it before this call
         try:
+            if name not in mgr._tools and name in TOOL_SET:
+                s = TOOL_SET[name]
+                payload = {"error": "tool not on", "why": f"{name} is in the {s} toolset, which is off",
+                           "do": f'toolset_enable("{s}")'}
+                if not kw.get("convert_result"):
+                    return payload
+                return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+                                      isError=True)
             return await inner(name, arguments, *a, **kw)
         finally:
             if mcp._hydra_toolsets.version != before:

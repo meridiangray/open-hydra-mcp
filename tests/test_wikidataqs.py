@@ -15,7 +15,7 @@ HITS = {"Bo Grant": [{"qid": "Q1", "label": "Bo Grant", "description": "American
 
 @pytest.fixture
 def archive(tmp_path, monkeypatch):
-    from hydra import suggest
+    from hydra.enrich import suggest
     monkeypatch.setattr(suggest, "places_for", lambda root, text, countries: [])
     monkeypatch.setitem(suggest.SOURCES, "wikidata.search",
                         lambda page, req: {"query": page["title"], "hits": HITS.get(page["title"], [])})

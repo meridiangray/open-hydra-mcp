@@ -9,18 +9,32 @@ previews unless `confirm=true`, which the model passes only once the person agre
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
 
-from hydra import build, collections_io, history, layout, resources, schema
-from hydra.identity import types
+from hydra.build import run as build
+from hydra.records import entities
+from hydra.sources import citations as hcite, pagelabels
+from hydra.schema import loader as schema, keys as hkeys, dates
+from hydra.archive import history, layout, resources
+from hydra.api.records import _RID, _about, _diff, amend_records  # noqa: F401  (moved: plans/imports.md I2b)
+from hydra.api.answers import _evidence, _evidence_file, _keep_evidence, answer  # noqa: F401  (moved: plans/imports.md I2c)
+from hydra.api.sources import quote_problem, short_quote
+from hydra.api.edits import _WIKI_LINE, _pin_key, _read_collection, _write_collection, pin_upstream, swap_source  # noqa: F401
 
-from hydra_mcp import core
+from hydra_mcp import core, pipeline, workflows, sources as src
 from hydra_mcp.core import AGENT, IngestError
+from collections import Counter
+from hydra.cli import node, todo, export as hexport
+from hydra.review import cutoffs, ids
+from hydra.shape import rules
+from hydra.universe import hid, layer, build as ubuild
+from hydra.wiki.views import timelineview
+from hydra.wiki.pages import reviewqueue
+from hydra.wiki.look import symbology as sym
 
 QUESTION_KINDS = ("merges", "references", "placements", "stale", "contradictions", "verdicts")
 
@@ -37,8 +51,6 @@ def _snap(root: Path, message: str) -> str | None:
 
 def find_entities(root: Path, query: str, schema_name: str = "", limit: int = 10) -> list[dict]:
     """node.find, with what tells each hit apart: its H, dates, nationality, posts, parents."""
-    from hydra import keys as hkeys
-    from hydra.cli import node
     k = hkeys.text(hkeys.load(root), query)          # a key (wikidata:Q57340, acme:EMP-0042) names one entity for certain
     row = core._keyed(root).get(k) if k else None
     if row:
@@ -52,10 +64,9 @@ def explain_entity(root: Path, ref: str) -> dict:
     """Where each value of an entity came from: per property and value, the records that
     supplied it, their collections and the documents they cite; its H and flags; and
     the review rows it takes part in. `ref` is an H, a record id or a title exactly one entry has
-    (`hydra.entities.resolve`: never fuzzy, a shared title is refused with the candidate Hs). A
+    (`hydra.records.entities.resolve`: never fuzzy, a shared title is refused with the candidate Hs). A
     record id that is no entity (a relationship: an Occupancy, an Ownership) answers with the
     record itself and the collection it lives in."""
-    from hydra.universe import hid
     nodes = core._declared(root)
     ref = str(ref or "").strip()
     if not ref:
@@ -99,8 +110,6 @@ def _node_of_entity(root: Path, nodes: dict, ref: str) -> str:
     """The archive node an H, a key or a unique title names (`core.resolve_entity`): the node holding the
     H's anchor record, else its first member this archive has. Without a universe layer only an exact
     caption one node has is taken."""
-    from hydra import entities
-    from hydra.universe import layer
     if not layer.is_universe(root):
         got = sorted(i for i, n in nodes.items() if str(n.get("caption") or "").casefold() == ref.casefold())
         if len(got) == 1:
@@ -139,7 +148,6 @@ def _question(kind: str, r: dict) -> dict:
 
 
 def open_questions(root: Path, kind: str | None = None, offset: int = 0, limit: int = 30) -> dict:
-    from hydra.cli import todo
     if not core._built(root):
         raise IngestError("the archive has not been built yet: save something first")
     got = todo.collect(root)
@@ -154,74 +162,14 @@ def open_questions(root: Path, kind: str | None = None, offset: int = 0, limit: 
             "how": "answer(id, choice) previews; answer it again with confirm=true once the person agrees"}
 
 
-def _evidence_file(root: Path) -> Path:
-    return root / layout.INTERNAL / "review-evidence.yaml"
-
-
-def _evidence(root: Path) -> dict:
-    f = _evidence_file(root)
-    try:
-        doc = yaml.safe_load(f.read_text(encoding="utf-8")) if f.is_file() else None
-    except (OSError, yaml.YAMLError):
-        doc = None
-    return doc if isinstance(doc, dict) else {}
-
-
-def _keep_evidence(root: Path, key: str, quote: str | None, source: str | None) -> None:
-    """The words and the source an answer rests on, kept beside the verdicts (their file takes only the verdict)."""
-    doc = _evidence(root)
-    if quote or source:
-        doc[key] = {k: v for k, v in (("quote", quote), ("source", source)) if v}
-    elif key in doc:
-        del doc[key]
-    else:
-        return
-    f = _evidence_file(root)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(yaml.safe_dump(doc, sort_keys=True, allow_unicode=True, width=10 ** 9), encoding="utf-8")
-
-
-def answer(root: Path, key: str, choice: str, confirm: bool = False, quote: str | None = None,
-           source: str | None = None) -> dict:
-    from hydra.cli import answer as hanswer
-    try:
-        value = hanswer.value_for(root, key, choice)
-    except SystemExit as e:
-        raise IngestError(str(e.code).removeprefix("hydra: ")) from None
-    target = hanswer.h_key(root, key)
-    out = {"id": key, "choice": choice, "writes": {target: value},
-           **({"evidence": {k: v for k, v in (("quote", quote), ("source", source)) if v}} if quote or source else {})}
-    if not confirm:
-        return {**out, "next": "confirm with the person, then call again with confirm=true"}
-    if value is None:                                 # clear: from every verdicts file that holds it, as the Review page does
-        from hydra.review import verdicts as vd
-        for f in vd.files(root):
-            doc = vd._yaml(f)
-            for k in {key, target}:
-                if isinstance(doc, dict) and k in doc:
-                    hanswer.set_verdict(f, k, None)
-    line = hanswer.set_verdict(root / layout.VERDICTS, target, value)
-    _keep_evidence(root, target, quote if value is not None else None, source if value is not None else None)
-    rep = _rebuild(root)
-    if key.startswith("end-"):                        # an open end is drawn from the pages, so they are rebuilt too
-        from hydra.universe import build as ubuild
-        ubuild.build(root)
-    from hydra_mcp import workflows
-    workflows.hook_log(root, f"answer {key}: {choice}")
-    return {**out, "recorded": line, "build": rep, "snapshot": _snap(root, f"answer {key}: {choice}")}
-
-
 def open_ends(root: Path, entity: str | None = None, collection: str | None = None) -> dict:
     """The Occupancy, Employment and Membership links with a start and no end, each with what could end it (the
     holder's death, the next holder's start, an event, another post that ended, a later date in the text). Answer one
     with `answer(id, choice)`: a candidate's `choice`, `holds` or `unknown`. An end picked here is a judgement, kept
     with its evidence, and drawn as inferred, never as a stated end date."""
-    from hydra.review import cutoffs
-    from hydra.universe import build as ubuild
     if not core._built(root):
         raise IngestError("the archive has not been built yet: save something first")
     if not ubuild.pages_current(root):
-        from hydra_mcp import pipeline
         pipeline._universe(root)
         ubuild.build(root)
     want = (entity or "").strip().lower()
@@ -240,7 +188,6 @@ def open_ends(root: Path, entity: str | None = None, collection: str | None = No
 def decisions(root: Path, kind: str | None = None, offset: int = 0, limit: int = 100) -> dict:
     """Every answer already given (.hydra/review/), as the Review page lists them: its `id`, the question it
     answered, what was said, and whether the build still asks it (`gone`: the records it was about changed)."""
-    from hydra.wiki import reviewqueue
     kinds = ("merge", "place", "ref", "cap", "stub", "end", "hide", "other")
     if kind and kind not in kinds:
         raise IngestError(f"kind is one of {', '.join(kinds)}")
@@ -258,8 +205,6 @@ def decisions(root: Path, kind: str | None = None, offset: int = 0, limit: int =
 def symbology(root: Path) -> dict:
     """The Symbology page as data, without its pictures: each entry type's icon, each badge's, each position's
     (a hints.yaml rule), each link type's colour, every image rule and what it reached, and the icons to pick from."""
-    from hydra.wiki import symbology as sym
-    from hydra_mcp import pipeline
     m = sym.model(pipeline._wiki(root))
     return {
         "types": [{"key": t["key"], "label": t["label"], "entries": t["n"], "icon": t["icon"], "set": t["set"]}
@@ -283,10 +228,9 @@ def symbology(root: Path) -> dict:
 
 
 def set_symbology(root: Path, kind: str, key: str, value: str = "", confirm: bool = False) -> dict:
-    """One symbology choice (the Symbology page's Set): `kind` one of hydra.wiki.symbology.KINDS, `key` the type,
+    """One symbology choice (the Symbology page's Set): `kind` one of hydra.wiki.look.symbology.KINDS, `key` the type,
     badge, position or link type, `value` an icon token, a #rrggbb colour, or a Timeline mark (start, fades, runs)
     ("" puts the default back)."""
-    from hydra.wiki import symbology as sym
     if kind not in sym.KINDS:
         raise IngestError(f"kind is one of {', '.join(sym.KINDS)}")
     if not isinstance(key, str) or not key:
@@ -296,7 +240,6 @@ def set_symbology(root: Path, kind: str, key: str, value: str = "", confirm: boo
         if value and not sym.COLOUR.fullmatch(value):
             raise IngestError("a colour is written #rrggbb")
     elif kind == "link-mark":
-        from hydra.wiki import timelineview
         if value and value not in timelineview.NO_END:
             raise IngestError(f"a Timeline mark is one of: {', '.join(timelineview.NO_END)}")
     elif value and value not in sym.library(root):
@@ -317,144 +260,13 @@ def set_symbology(root: Path, kind: str, key: str, value: str = "", confirm: boo
         said = sym.set_(root, kind, key, value, who=AGENT)
     except (ValueError, SystemExit) as e:
         raise IngestError(str(e.code if isinstance(e, SystemExit) else e).removeprefix("hydra: ")) from None
-    from hydra_mcp import workflows
     workflows.hook_log(root, f"set_symbology {kind} {key}={value}")
     return {**out, "written": said, "note": "the archive and its pages are rebuilt; wiki_serve shows the change"}
 
 
 # ---- correcting --------------------------------------------------------------------------
 
-_RID = re.compile(r"^([A-Za-z0-9_-]+)(?=[.:])")
-
-
-def _about(msg: str) -> str | None:
-    """The record id a check message starts with (`rec-1.birthDate: ...`, `rec-1: ...`)."""
-    m = _RID.match(msg)
-    return m.group(1) if m else None
-
-
-def _diff(old: dict, new: dict) -> dict:
-    """What a replaced record changes: per property, its values now and the ones it will have."""
-    o, n = old.get("properties") or {}, new.get("properties") or {}
-    return {p: {"now": o.get(p), "new": n.get(p)} for p in dict.fromkeys([*o, *n]) if o.get(p) != n.get(p)}
-
-
-def amend_records(root: Path, collection: str, records: list[dict] | None = None,
-                  remove: list[str] | None = None, link_by: str = "id", confirm: bool = True,
-                  details: bool = False) -> dict:
-    """Change an existing collection record by record: each of `records` with an `id`
-    already in it replaces that record (the whole record: give every property it keeps);
-    one with a new or no id is added; `remove` drops records by id. Checked as `save`
-    checks, but only the records being changed count: what is wrong with the others is
-    one summary line. Previews unless `confirm`; nothing is written if the changed
-    records have errors. `details`: the full warnings and ambiguous links."""
-    f = root / layout.COLLECTIONS_DIR / f"{collection}.json"
-    stored, lines = _read_collection(f)
-    if stored is None:
-        raise IngestError(f"no collection '{collection}'")
-    by_id = {r["id"]: r for r in stored}
-    from hydra import collectionops
-    try:
-        pre = collectionops.prefix_of(root, collection)
-    except Exception:
-        pre = ""
-
-    def local(rid):                                  # `saud:yasir` is the collection's own `yasir`; another prefix is no record here
-        rid = str(rid or "")
-        if ":" not in rid or rid in by_id:
-            return rid
-        head, _, rest = rid.partition(":")
-        if head == pre and rest in by_id:
-            return rest
-        raise IngestError(f"no record '{rid}' in {collection}" + (f" (its ids are prefixed '{pre}:')" if pre else "")
-                          + ": give an id the collection holds (`get_records` shows them); a new record takes no id of another archive's prefix")
-    remove = {local(x) for x in remove or []}
-    records = [({**r, "id": local(r.get("id"))} if isinstance(r, dict) and r.get("id") else r) for r in records or []]
-    missing = sorted(remove - set(by_id))
-    if missing:
-        raise IngestError(f"no record {', '.join(missing)} in {collection}")
-    for i, r in enumerate(records or []):
-        if not isinstance(r, dict):
-            raise IngestError(f"records[{i}] must be an object with `schema` and `properties`")
-        extra = sorted(set(r) - {"id", "schema", "properties", "_meta", "basis"})
-        if extra:
-            raise IngestError(f"records[{i}] has no field {', '.join(extra)}: a record is {{id, schema, properties}}")
-    changed, added = [], []
-    new_of: dict[str, dict] = {}
-    merged = [r for r in stored if r["id"] not in remove]
-    for r in records or []:
-        rid = str(r.get("id") or "")
-        if rid in by_id and rid not in remove:
-            keep_sources = (by_id[rid].get("properties") or {}).get("sources") or []
-            props = {p: core._values(v) for p, v in (r.get("properties") or {}).items()}
-            if keep_sources and "sources" not in props:
-                props["sources"] = keep_sources                # the evidence it was saved with stays cited
-            old = by_id[rid]
-            approx = {p: q for p, q in ((old.get("_meta") or {}).get("approx") or {}).items()
-                      if props.get(p) == (old.get("properties") or {}).get(p)}   # a date given again keeps its "c."
-            new = {"id": rid, "schema": r.get("schema") or old["schema"], "properties": props}
-            wd = {f: c for f, c in {**((old.get("_meta") or {}).get("wd") or {}), **((r.get("_meta") or {}).get("wd") or {})}.items()
-                  if props.get(f)}                              # the standard codes (hydra/wdprops.py) of the fields still held
-            given = core.basis_of(r)
-            kept = {p: st for p, st in ((old.get("_meta") or {}).get("basis") or {}).items()
-                    if props.get(p) and props.get(p) == (old.get("properties") or {}).get(p)}   # a value given again keeps its state
-            basis = {**kept, **given} if isinstance(given, dict) else (given if given is not None else kept)
-            if approx or wd or basis:
-                new["_meta"] = {**({"approx": approx} if approx else {}), **({"wd": wd} if wd else {}),
-                                **({"basis": basis} if basis else {})}
-            merged = [new if x["id"] == rid else x for x in merged]
-            new_of[rid] = new
-            changed.append(rid)
-        else:
-            added.append(r)
-    report = core.check_records(root, [*[{k: v for k, v in x.items() if k in ("id", "schema", "properties", "_meta")}
-                                          for x in merged], *added], collection, link_by=link_by)
-    added_ids = [x["id"] for x in report["records"] if x["id"] not in by_id]
-    touched = set(changed) | set(added_ids)
-    mine = lambda m: (_about(m) in touched) or _about(m) is None
-    errors = [m for m in report["errors"] if mine(m)]
-    warns = [m for m in report["warnings"] if mine(m)]
-    elsewhere = {"errors": len(report["errors"]) - len(errors), "warnings": len(report["warnings"]) - len(warns)}
-    out = {"collection": collection, "changed": changed, "added": len(added), "removed": sorted(remove)}
-    if elsewhere["errors"] or elsewhere["warnings"]:
-        out["elsewhere"] = (f"{elsewhere['errors']} error(s) and {elsewhere['warnings']} warning(s) concern other records "
-                            f"of {collection}; this change leaves them alone")
-        if details:
-            out["elsewhere_errors"] = [m for m in report["errors"] if not mine(m)]
-    cap = 10
-    out["warnings"] = warns if details else warns[:cap]
-    if len(warns) > len(out["warnings"]):
-        out["warnings_more"] = len(warns) - len(out["warnings"])
-    amb = [a for a in report["ambiguous_links"] if a.get("record") in touched]
-    out["ambiguous_links"] = amb if details else len(amb)
-    if errors:
-        return {"saved": False, "errors": errors, **out}
-    if not confirm:
-        return {"saved": False, "preview": True, **out,
-                "diff": {rid: _diff(by_id[rid], new_of[rid]) for rid in changed},
-                "added_records": [{"id": x["id"], "schema": x["schema"]} for x in report["records"] if x["id"] in added_ids],
-                "next": "confirm with the person, then call again with confirm=true"}
-    before = f.read_bytes()
-    fixed = {x["id"]: x for x in core.storable(report["records"])}
-    old_sources = {r["id"]: (r.get("properties") or {}).get("sources") for r in stored}
-    for rid in added_ids:                                       # new records cite what the collection cites
-        r = fixed[rid]
-        if not r["properties"].get("sources") and old_sources:
-            first = next((s for s in old_sources.values() if s), None)
-            if first and "sources" in schema.resolve(r["schema"])["props"]:
-                r["properties"]["sources"] = list(first)
-    out_recs = [fixed[x["id"]] if x["id"] in touched else x for x in merged] + [fixed[i] for i in added_ids]
-    _write_collection(f, out_recs, lines)
-    try:
-        rep = _rebuild(root)
-    except Exception as e:
-        f.write_bytes(before)
-        raise IngestError(f"the build failed, so nothing was kept: {e}") from None
-    snap = _snap(root, f"amend {collection}: {len(changed)} changed, {len(added)} added, {len(remove)} removed")
-    from hydra_mcp import workflows
-    workflows.hook_log(root, f"amend {collection}: {len(changed)} changed, {len(added)} added, {len(remove)} removed")
-    return {"saved": True, **out, "build": rep, "snapshot": snap,
-            "undo": f"history_restore {snap[:12]}~1" if snap else None}
+# amend_records moved to hydra.api.records (plans/imports.md I2b); it is imported above.
 
 
 def preview(root: Path, records: list[dict], collection: str = "preview", link_by: str = "id") -> dict:
@@ -480,8 +292,6 @@ def preview(root: Path, records: list[dict], collection: str = "preview", link_b
 
 
 def _summary(root: Path) -> dict:
-    from hydra.cli import export as hexport
-    from hydra.review import ids
     try:
         cap = hexport.compile_(root)
     except Exception:                                   # nothing to build yet
@@ -495,82 +305,7 @@ def _summary(root: Path) -> dict:
             "open": sum(1 for row in cap["ledger"] if row.get("status") in ("proposed", "unresolved", "conflict"))}
 
 
-# ---- identity ------------------------------------------------------------------------
-
-def pin_upstream(root: Path, collection: str, record: str, h: str, confirm: bool = False) -> dict:
-    """Pin a saved record to a canonical id: it is that entity from now on (and that H is
-    published: its body holds), or give it a key (`wikidata:Q57340`, `acme:EMP-0042`): every
-    record holding that key is one entity. The pin goes in the record's `upstream`."""
-    from hydra import keys as hkeys
-    from hydra.universe import hid
-    if hkeys.parse(h):
-        return _pin_key(root, collection, record, h, confirm)
-    try:
-        _, body = hid.split_pin(h)
-    except ValueError:
-        raise IngestError(f"'{h}' is neither an H (H-<state><flags>-<12 characters>, or H-<12 characters>) "
-                          "nor a key (namespace:key)") from None
-    from hydra.universe import layer
-    known = {r["body"]: r for r in layer.read_parsed(root, "canon.jsonl", missing=[])}
-    if body not in known:
-        raise IngestError(f"no H {h} in this archive's universe (build first, or check `find_entities`)")
-    f = root / layout.COLLECTIONS_DIR / f"{collection}.json"
-    stored, lines = _read_collection(f)
-    rec = next((r for r in stored or [] if r.get("id") == record), None)
-    if rec is None:
-        raise IngestError(f"no record '{record}' in collection '{collection}'")
-    out = {"record": record, "h": known[body]["h"], "entity": known[body].get("title")}
-    if not confirm:
-        return {**out, "next": "confirm with the person that this record is that entity, then call again with confirm=true"}
-    pins = list(dict.fromkeys([*core._values((rec.get("properties") or {}).get("upstream") or []), "H-" + body]))
-    rec.setdefault("properties", {})["upstream"] = pins
-    _write_collection(f, stored, lines)
-    core._publish_pinned(root, [rec])
-    rep = _rebuild(root)
-    from hydra_mcp import workflows
-    workflows.hook_log(root, f"pin_upstream {record} -> H-{body}")
-    return {**out, "pinned": True, "build": rep, "snapshot": _snap(root, f"pin {record} to H-{body}")}
-
-
-def _read_collection(f: Path) -> tuple[list | None, bool]:
-    """A collection file's records, and whether it is one record per line (as `import` writes it)
-    rather than a JSON array (as `save` does); (None, False) when there is no such file.
-    hydra.collections_io: the one reader hydra-ctl, the wiki and this server share."""
-    return collections_io.read(f)
-
-
-def _write_collection(f: Path, records: list, lines: bool) -> None:
-    collections_io.write(f, records, lines)
-
-
-def _pin_key(root: Path, collection: str, record: str, key: str, confirm: bool) -> dict:
-    """Add a key to a saved record's `upstream`: it is one entity with every record holding that key."""
-    from hydra import keys as hkeys
-    conf = hkeys.load(root)
-    k = hkeys.text(conf, key)
-    f = root / layout.COLLECTIONS_DIR / f"{collection}.json"
-    stored, lines = _read_collection(f)
-    rec = next((r for r in stored or [] if r.get("id") == record), None)
-    if rec is None:
-        raise IngestError(f"no record '{record}' in collection '{collection}'")
-    row = core._keyed(root).get(k)
-    ns = k.split(":", 1)[0]
-    out = {"record": record, "key": k, **({"joins": row.get("title"), "h": row["h"]} if row else {}),
-           **({} if ns in conf["namespaces"] else
-              {"note": f"namespace '{ns}' is not declared in {layout.KEYS}; it merges all the same"})}
-    if not confirm:
-        return {**out, "next": ("confirm with the person that this record is " + (f"{row.get('title')}" if row else
-                                "the entity that key names") + ", then call again with confirm=true")}
-    pins = list(dict.fromkeys([*core._values((rec.get("properties") or {}).get("upstream") or []), key.strip()]))
-    rec.setdefault("properties", {})["upstream"] = pins
-    _write_collection(f, stored, lines)
-    rep = _rebuild(root)
-    from hydra_mcp import workflows
-    workflows.hook_log(root, f"pin_upstream {record} key={k}")
-    return {**out, "pinned": True, "build": rep, "snapshot": _snap(root, f"key {record} as {k}")}
-
-
-_WIKI_LINE = re.compile(r"^\s*Source:\s*https?://\S*wikipedia\.org\S*\s*$", re.I | re.M)
+# ---- describing sources ---------------------------------------------------------------
 
 
 # what a reader of a source is told about it: the key `cite` takes -> the property of the source document
@@ -584,7 +319,6 @@ def describe_sources(root: Path, sources: list[dict]) -> tuple[list[dict], list[
     """Check reader fields for kept sources: [{source, title?, author?, publisher?, published?, url?, summary?,
     language?, keywords?, duration?, pictured?, call_number?}]. -> (what each source becomes, errors, the files to
     write). A blank value removes the field. Machine fields (hash, size, type) are not for an agent to set."""
-    from hydra import dates
     schema.load(root=root)
     out, errors, files = [], [], {}
     for i, r in enumerate(sources or []):
@@ -635,13 +369,11 @@ def describe_sources(root: Path, sources: list[dict]) -> tuple[list[dict], list[
 
 def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
          sources: list[dict] | None = None) -> dict:
-    """Say where in a source each record's facts are (hydra.citations): the source document, its pages (`pages`:
+    """Say where in a source each record's facts are (hydra.sources.citations): the source document, its pages (`pages`:
     as printed on the document; `pdfPages`: the page of the file; a kept PDF fills in whichever is missing when the
     printed number can be read and confirmed, else it stays blank), a locator, the words quoted. Any record, relationships included. `sources` also says what a source is
     (title, author, publisher, date, summary...), for the pages that cite it. Without `confirm`: the rows
     resolved against the last build and every problem, writing nothing."""
-    from hydra import citations as hcite, pagelabels
-    from hydra_mcp import sources as src
     citations = citations or []
     rows, errors = hcite.check(root, citations) if citations or not sources else ([], [])
     errors = list(errors)
@@ -650,6 +382,7 @@ def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
     texts: dict[str, str | None] = {}
     labels: dict[str, dict[int, str]] = {}
     filled: list[str] = []
+    warnings: list[str] = []
     for r in rows:
         q = (r.get("quote") or "").strip()
         sid = r["source"]
@@ -657,12 +390,17 @@ def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
             if sid not in texts:
                 texts[sid] = src.text_of(root, sid)
             t = texts[sid]
-            if t is not None and not src.verbatim(q, [t]):
-                errors.append(
-                    f"{r['record']} ({sid}): quote '{q[:90]}' is not in the source's text word for word "
-                    "(read_source with `find` locates it)"
-                )
-            elif t is not None and not (r.get("pdfPages") or "").strip():
+            why = quote_problem(q, [t]) if t else None
+            if not t:
+                errors.append(f"{r['record']} ({sid}): the source has no text to check this quote against; "
+                              "cite it without a quote")
+                continue
+            if why:
+                errors.append(f"{r['record']} ({sid}): quote '{q[:90]}' is {why} (read_source with `find` locates it)")
+                continue
+            if short_quote(q):
+                warnings.append(f"{r['record']} ({sid}): quote '{q[:90]}' {short_quote(q)}")
+            if not (r.get("pdfPages") or "").strip():
                 found = src.pages_of_quote(t, src.page_ranges_of(root, sid), q)
                 if found:                                         # the quote's own page of the kept PDF (not the printed one)
                     r["pdfPages"] = found
@@ -685,8 +423,8 @@ def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
                 filled.append(f"{r['record']}: pdfPages {got!r} is where printed page {r['pages']} stands")
     have = hcite.load(root)
     out = {"citations": [{**r, "replaces": have[(r["record"], r["source"])]} if (r["record"], r["source"]) in have else r
-                         for r in rows], "errors": errors, **({"sources": described} if described else {}),
-           **({"page_notes": filled} if filled else {})}
+                         for r in rows], "errors": errors, **({"warnings": warnings} if warnings else {}),
+           **({"sources": described} if described else {}), **({"page_notes": filled} if filled else {})}
     if errors or not confirm:
         return {**out, "next": "fix the errors and call again" if errors else
                 "check each row says what the source says, then call again with confirm=true"}
@@ -695,7 +433,6 @@ def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
     for f, recs in sfiles:
         f.write_text(json.dumps(recs, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     n = len(rows)
-    from hydra_mcp import workflows
     for r in rows:
         workflows.hook_source(root, r["source"])
     workflows.hook_log(root, f"cite: {n} citation(s)")
@@ -705,76 +442,8 @@ def cite(root: Path, citations: list[dict] | None = None, confirm: bool = False,
             "note": "the wiki shows them once its pages are rebuilt (wiki_serve)"}
 
 
-def swap_source(root: Path, collection: str, record: str, source: str, quote: str, confirm: bool = False) -> dict:
-    """Re-source a saved record: its Wikipedia citation out, a kept source in. `quote` must be in the kept
-    source's text word for word. The record's Wikipedia URLs go, and so do the notes that quote the
-    Wikipedia article; every other note stays (structured lines such as `House: ...` included). The new
-    source's URL goes in `sourceUrl` (and its id in `sources` where the schema has that), the quote in
-    `notes`. Without `confirm`: what would change."""
-    from hydra_mcp import sources as src
-    text = src.text_of(root, source)
-    if text is None:
-        raise IngestError(f"no kept source '{source}' with text: fetch_source keeps one")
-    if not src.verbatim(quote, [text]):
-        raise IngestError("the quote is not in the new source's text word for word: copy the sentence exactly "
-                          "(read_source with `find` locates it)")
-    new_url = (core._existing_source(root, source).get("properties") or {}).get("sourceUrl") or []
-    f = root / layout.COLLECTIONS_DIR / f"{collection}.json"
-    stored, lines = _read_collection(f)
-    rec = next((r for r in stored or [] if r.get("id") == record), None)
-    if rec is None:
-        raise IngestError(f"no record '{record}' in collection '{collection}'")
-    props = rec.setdefault("properties", {})
-    before = {k: list(core._values(props.get(k) or [])) for k in ("sourceUrl", "sources", "notes")}
-    wiki_urls = [u for u in before["sourceUrl"] if "wikipedia.org" in u]
-    wiki_urls += [m for n in before["notes"] for m in re.findall(r"https?://\S*wikipedia\.org\S*", n)]
-    wiki_text = []
-    for u in dict.fromkeys(wiki_urls):
-        try:
-            wiki_text.append(src.page(u)["text"])
-        except IngestError:
-            pass
-    notes = []
-    for n in before["notes"]:
-        n2 = _WIKI_LINE.sub("", n).strip()
-        if n2 and not (wiki_text and src.verbatim(n2, wiki_text)):     # a quote of the Wikipedia article goes
-            notes.append(n2)
-    after = {"sourceUrl": list(dict.fromkeys([u for u in before["sourceUrl"] if "wikipedia.org" not in u] + new_url)),
-             "notes": notes + [quote.strip()]}
-    if "sources" in schema.resolve(rec.get("schema", ""))["props"]:
-        after["sources"] = list(dict.fromkeys(before["sources"] + [source]))
-    out = {"record": record, "collection": collection, "wikipedia_removed": list(dict.fromkeys(wiki_urls)),
-           "before": before, "after": after}
-    # a figure the old quotes gave that the new one does not: the record's own fields may now say more than the source
-    num = lambda s: set(re.findall(r"\d[\d,.]*", s.replace("£", " ").replace("$", " ")))
-    lost = sorted(num(" ".join(n for n in before["notes"] if n not in notes)) - num(quote))
-    if lost:
-        out["check"] = (f"the old quotes gave {', '.join(lost)}, the new one does not: check that the record's "
-                        "fields (amount, dates, share) and status still say only what the new source states "
-                        "(\"more than\", \"reportedly\", \"about\" mean a blank field and a caveat status)")
-    if not wiki_urls:
-        out["note"] = "this record cites no Wikipedia page; the source is added all the same"
-    if not confirm:
-        return {**out, "next": "confirm with the person, then call again with confirm=true"}
-    for k, v in after.items():
-        if v:
-            props[k] = v
-        else:
-            props.pop(k, None)
-    _write_collection(f, stored, lines)
-    rep = _rebuild(root)
-    from hydra import provenance
-    from hydra_mcp import workflows
-    workflows.hook_source(root, source)
-    workflows.hook_log(root, f"swap_source {record} -> {source}")
-    origin = provenance.origin(new_url[0]) if new_url else "a kept source"
-    return {**out, "swapped": True, "build": rep, "snapshot": _snap(root, f"re-sourced {record}: {origin} instead of Wikipedia")}
-
-
 def keys_in_use(root: Path) -> dict:
     """keys.yaml as in effect, and how many entities hold a key of each namespace."""
-    from collections import Counter
-    from hydra import keys as hkeys
     conf = hkeys.load(root)
     held = Counter(k.split(":", 1)[0] for k in core._keyed(root))
     return {"file": str(hkeys.path(root)), "primary": conf["primary"], "namespaces": conf["namespaces"],
@@ -787,7 +456,6 @@ def set_positions(root: Path, positions: dict, confirm: bool = False) -> dict:
     """Preview (default) or write `.hydra/rules/positions.yaml`: this archive's rank ladder,
     {name: {below: [...], titles: [...], outside: bool}}. The preview says, for each
     position, how many roles in the archive its titles rank, and which roles none takes."""
-    from hydra.shape import rules
     if not isinstance(positions, dict) or not positions:
         raise IngestError("positions: {name: {below: [names above it], titles: [the words that mean it]}}")
     bad = [k for k, v in positions.items() if not isinstance(v, dict)
@@ -814,7 +482,6 @@ def set_positions(root: Path, positions: dict, confirm: bool = False) -> dict:
     p.write_text("# this archive's rank ladder (written by hydra-mcp set_positions)\n"
                  + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
     rep = _rebuild(root)
-    from hydra_mcp import workflows
     workflows.hook_log(root, f"set_positions: {len(positions)} positions")
     return {**out, "written": p.relative_to(root).as_posix(), "build": rep,
             "snapshot": _snap(root, f"set_positions: {len(positions)} positions")}
@@ -853,7 +520,6 @@ def link_images(root: Path, images: list[dict], confirm: bool = False) -> dict:
     out = {"images": len(done), "problems": problems,
            "added": sum(1 for d in done if d.get("added"))}
     if confirm and out["added"]:
-        from hydra_mcp import workflows
         workflows.hook_log(root, f"link_images: {out['added']} rule(s)")
         out["snapshot"] = _snap(root, f"link_images: {out['added']} rule(s)")
     elif not confirm:
@@ -905,6 +571,5 @@ def history_restore(root: Path, ref: str, paths: list[str] | None = None, confir
     changed, new = history.restore(root, sid, paths or None, message=f"hydra-mcp restore to {sid[:12]}", who=AGENT)
     rep = _rebuild(root) if changed else None
     if changed:
-        from hydra_mcp import workflows
         workflows.hook_log(root, f"history_restore {sid[:12]}")
     return {**out, "restored": changed, "snapshot": new, "build": rep}

@@ -137,7 +137,7 @@ def test_amend_records_sets_and_keeps_basis(archive):
 
 
 def test_the_fields_guide_describes_basis():
-    from hydra import guides
+    from hydra.agents import guides
     text = guides.read_guide("fields", None, None)["content"]
     assert '"basis"' in text and "recalled" in text
 
@@ -159,7 +159,7 @@ def test_cite_fills_the_pdf_page_from_the_quote(saved):
     assert not pre["errors"] and [c["pdfPages"] for c in pre["citations"]] == ["1", "2"]
     assert all("pages" not in c for c in pre["citations"])          # this PDF prints no page numbers: nothing is guessed
     assert agent.cite(archive, rows, confirm=True)["written"] == 2
-    from hydra import citations
+    from hydra.sources import citations
     assert {v["pdfPages"] for v in citations.load(archive).values()} == {"1", "2"}
     assert {v["pages"] for v in citations.load(archive).values()} == {""}
 

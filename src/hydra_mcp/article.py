@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hydra import articles
+from hydra.records import articles
 
 from hydra_mcp import core
 from hydra_mcp.core import IngestError

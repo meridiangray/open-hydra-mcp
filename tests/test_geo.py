@@ -1,7 +1,7 @@
 """The geo tools as an agent uses them: save research records, say where they are, ask, and correct."""
 import pytest
 
-from hydra import history, layout, resources
+from hydra.archive import history, resources
 from hydra.cli import main as cli
 from hydra_mcp import core, geo, guidelines
 

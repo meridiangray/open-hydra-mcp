@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from hydra import history, layout, resources
+from hydra.archive import history, layout, resources
 from hydra.cli import main as cli
-from hydra.universe import layer, table
+from hydra.universe import table
 from hydra_mcp import agent, core
 
 P = lambda s, **p: {"schema": s, "properties": p}
@@ -172,7 +172,7 @@ def test_save_changes_previews_then_saves(archive, tmp_path):
     core.ingest(archive, [P("Person", name="Di Moss")], text(tmp_path, "s.txt", "Di Moss."), "a")
     prev = agent.save_changes(archive, "Add Di Moss")
     assert "next" in prev and prev["steps"] >= 1 and any(e["name"] == "Di Moss" for e in prev["entities"])
-    from hydra import history
+    from hydra.archive import history
     assert history.last_save(archive) is None
     done = agent.save_changes(archive, "Add Di Moss", "from s.txt", confirm=True)
     s = history.snap(archive, done["saved"])

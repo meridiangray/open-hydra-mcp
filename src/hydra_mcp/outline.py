@@ -17,7 +17,7 @@ MAX = 400
 
 
 def _bookmarks(path: Path) -> list[dict]:
-    from pypdf import PdfReader
+    from pypdf import PdfReader  # lazy: startup
     try:
         r = PdfReader(str(path))
         out = []
@@ -48,7 +48,7 @@ def _scan_batches(heads: list[dict], stem: str) -> bool:
 
 
 def _docx_heads(path: Path) -> list[dict]:
-    import docx
+    import docx  # lazy: startup
     out = []
     for p in docx.Document(str(path)).paragraphs:
         m = re.match(r"Heading (\d)", p.style.name or "") if p.style is not None else None

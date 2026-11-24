@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from hydra import cli, layout
+from hydra import cli
+from hydra.archive import layout
 from hydra_mcp import core, mint
 
 TEXT = ("ACME TIMES, 3 May 2021. Dana Hale, administrator of the Port Authority, said her deputy "

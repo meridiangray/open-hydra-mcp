@@ -3,11 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from hydra import packages as P
+from hydra.machine import packages as P
 from hydra.cli import main as cli
 from hydra_mcp import core, geo
 
-PK = next((Path(P.__file__).parent / "registry").glob("hydra-context-kurdistan-*.hydrapkg"))
+PK = next((Path(P.__file__).parents[1] / "registry").glob("hydra-context-kurdistan-*.hydrapkg"))
 Q = lambda s, **p: {"schema": s, "properties": p}
 
 

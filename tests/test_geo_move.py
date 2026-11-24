@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from hydra import history
+from hydra.archive import history
 from hydra.cli import main as cli
 from hydra_mcp import core, geo
 

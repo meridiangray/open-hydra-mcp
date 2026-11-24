@@ -1,7 +1,8 @@
 """article_sections and set_article_section: preview first, imported text read-only, the person's text kept."""
 import pytest
 
-from hydra import articles, history
+from hydra.records import articles
+from hydra.archive import history
 from hydra.cli import main as cli
 from hydra_mcp import article, core, server
 

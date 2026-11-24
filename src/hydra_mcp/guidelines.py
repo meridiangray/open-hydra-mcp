@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hydra import layout, schema
+from hydra.schema import loader as schema, keys as hkeys, vocab
+from hydra.archive import layout
 
 from hydra_mcp import core
+from hydra.wiki.pages import readiness
 
 # the relationships text usually states, in the order the table shows them
 RELATIONSHIPS = ("Membership", "Employment", "Directorship", "Ownership", "Occupancy", "Representation",
@@ -226,7 +228,6 @@ def hierarchy_section(root: Path) -> str:
 
 def keys_section(root: Path) -> str:
     """The key namespaces this archive declares, and which one entities are keyed by first."""
-    from hydra import keys as hkeys
     conf = hkeys.load(root)
     if not conf["namespaces"] and not conf["primary"]:
         return ""
@@ -247,7 +248,6 @@ def keys_section(root: Path) -> str:
 
 def vocabulary_section(root: Path) -> str:
     """The words this archive's status and capacity fields take, and what hydra does with each."""
-    from hydra import vocab
     vs = vocab.load(root)
     if not vs:
         return ""
@@ -272,7 +272,6 @@ def readiness_section(root: Path) -> str:
     """What this archive's pages still lack, when its pages have been built."""
     if not (root / layout.UNIVERSE_PARSED / "pages.jsonl").is_file():
         return ""
-    from hydra.wiki import readiness
     found = [f for f in readiness.check(root) if f["level"] == "warning"][:6]
     if not found:
         return ""

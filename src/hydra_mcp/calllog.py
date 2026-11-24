@@ -2,7 +2,7 @@
 
 `install(mcp)` wraps `mcp._tool_manager.call_tool` outermost. After each call it finds the archive (the
 `archive` argument) and the one `checked-out` task there held by this server (a holder in
-`hydra.tasks.MCP_HOLDER`), and appends a row to `.hydra/tasks/<task id>.calls.jsonl`:
+`hydra.agents.tasks.MCP_HOLDER`), and appends a row to `.hydra/tasks/<task id>.calls.jsonl`:
 `{n, at, tool, args, ok, error, ms, step, holder}`. Arguments are summarised, never copied: long strings
 become `"<N chars>"`, text-bearing keys are always reduced, secrets are never written. Logging never breaks a
 call: every failure to log is swallowed and the reply goes back unchanged.
@@ -14,6 +14,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from hydra.agents import tasks
+from hydra_mcp import workflows, core
 
 LONG = 80                                   # strings longer than this are reduced
 CACHE_SECONDS = 2.0
@@ -101,7 +103,6 @@ def outcome(result) -> tuple[bool, dict | None]:
 
 
 def _held(root: Path, tool: str) -> tuple[str, str] | None:
-    from hydra import tasks
     key = str(root)
     now = time.monotonic()
     with _lock:
@@ -113,7 +114,6 @@ def _held(root: Path, tool: str) -> tuple[str, str] | None:
     mine = [t for t in tasks.list_tasks(root, status="checked-out") if t.get("holder") in tasks.MCP_HOLDER]
     # the task this session checked out last wins: with two held, the log used to stop altogether
     # (2026-11-21 Pollard run: every call after the second checkout went unlogged)
-    from hydra_mcp import workflows
     cur = workflows._CURRENT_TASK.get(key)
     pick = next((t for t in mine if t["id"] == cur), None) or (mine[0] if len(mine) == 1 else None)
     if pick:
@@ -130,7 +130,6 @@ UNTASKED = "untasked"                        # calls made in an archive while th
 
 
 def _next_code(root: Path, task_id: str):
-    from hydra import tasks
     try:
         nxt = tasks.get_task(root, task_id).get("next_step")
     except Exception:
@@ -139,7 +138,6 @@ def _next_code(root: Path, task_id: str):
 
 
 def _append(root: Path, task_id: str, row: dict) -> None:
-    from hydra import tasks
     path = tasks.tasks_dir(root) / f"{task_id}.calls.jsonl"
     with _lock:
         n = 1
@@ -155,7 +153,6 @@ def _append(root: Path, task_id: str, row: dict) -> None:
 def record(name: str, args: dict, result, ms: int, raised: BaseException | None = None) -> None:
     """Append the row for one finished call, when this server holds a task in the call's archive."""
     try:
-        from hydra_mcp import core
         if not args.get("archive"):
             return
         root = Path(core.open_archive(args.get("archive"))).resolve()

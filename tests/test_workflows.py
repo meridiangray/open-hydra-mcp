@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from hydra import citations as hcitations, layout
+from hydra.sources import citations as hcitations
+from hydra.archive import layout
 from hydra_mcp import core, server
 
 
@@ -235,7 +236,6 @@ def test_cite_verbatim_and_site_provenance_and_geo_report_entities(arch, tmp_pat
 
 
 def test_mcp_task_lifecycle_hooks_and_cli_parity_tools(arch, tmp_path):
-    from hydra_mcp import workflows as wf
     assert "places" in {w["name"] for w in server.workflows(archive=str(arch))["workflows"]}
 
     note_file = tmp_path / "src.txt"
@@ -258,7 +258,7 @@ def test_mcp_task_lifecycle_hooks_and_cli_parity_tools(arch, tmp_path):
     co = server.task_checkout(tid, holder="one", archive=str(arch))
     assert co["holder"] == "one" and co["archive_details"]["name"] == "case"
     assert co["next_step"]["code"] == "G1" and co["next_step"]["tool"] == "geo_report" and co["guides_to_load"]
-    from hydra import tasks as htasks
+    from hydra.agents import tasks as htasks
     with pytest.raises(htasks.TaskError, match="already checked out"):
         htasks.checkout_task(arch, tid, holder="agent:two")
 
@@ -313,7 +313,7 @@ def test_mcp_task_lifecycle_hooks_and_cli_parity_tools(arch, tmp_path):
 
 def test_mcp_holder_default_and_write_lock_busy(tmp_path, monkeypatch):
     import asyncio
-    from hydra import writelock
+    from hydra.archive import writelock
     from hydra.cli import init as hinit
     from hydra_mcp import server, workflows as wf
     monkeypatch.delenv("HYDRA_HOLDER", raising=False)
@@ -354,7 +354,7 @@ def test_contexts_tool_lists_and_ranks(arch):
 
 
 def test_context_checkout_previews_then_sets_and_is_fixed_after_a_write(arch):
-    from hydra import tasks as htasks
+    from hydra.agents import tasks as htasks
     tid = _ctx_task(arch, workflow="enrich")
     pre = server.context_checkout(tid, "incident", "arrest report", archive=str(arch))
     assert pre["written"] is False and pre["context"]["name"] == "incident"

@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from hydra import schema
+from hydra.schema import loader as schema
 from hydra_mcp import mint
 
 

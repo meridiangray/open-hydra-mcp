@@ -11,11 +11,12 @@ A map of every tool: when to reach for it and how. The agent reads the guide thr
 
 ## Toolsets
 
-A client may load only some tools. Every tool is in one set; `core` is always on. The server starts with `core` (or the sets named by `hydra-mcp --toolsets core,geo` or env `HYDRA_MCP_TOOLSETS`; `all` is everything). If a tool you need is missing, call `toolsets()` to list the sets, then `toolset_enable("<set>")`: the client is told the tool list changed. `task_checkout` switches on the sets its task's route needs and says so in `toolsets_enabled`.
+A client may load only some tools. Every tool is in one set; `core` is always on. The server starts with `core` (or the sets named by `hydra-mcp --toolsets core,geo` or env `HYDRA_MCP_TOOLSETS`; `all` is everything). If a tool you need is missing, call `toolsets()` to list the sets, then `toolset_enable("<set>")`: the client is told the tool list changed. `task_checkout` switches on the sets its task's route needs and says so in `toolsets_enabled`. `toolset_disable`, `tool_on` and `tool_off` switch a set off or a single tool on or off. The same choices live in `mcp.yaml` (machine-wide, with an optional `.hydra/mcp.yaml` per archive) and are edited from a shell with `hydra-mcp config show | on | off | reset`; a running server picks up the change before its next call. Sets or tools the person lists under `locked` cannot be switched on by an agent.
 
-- **`core`**: Always on: guide, tasks, records, sources, schema, recipes. `guide`, `workflows`, `details`, `tasks`, `task`, `task_new`, `task_checkout`, `task_step`, `task_add`, `task_verify`, `task_release`, `task_close`, `contexts`, `context_checkout`, `create_archive`, `describe_schema`, `properties`, `check`, `check_records`, `save`, `preview`, `get_records`, `amend_records`, `find_entities`, `explain_entity`, `read_file`, `source_profile`, `source_outline`, `source_names`, `read_source`, `sources`, `cite`, `labelling_guidelines`, `vocabularies`, `keys`, `collections`, `collection_create`, `recipe`, `paths`, `toolsets`, `toolset_enable`, `extra_fields`, `field_assign`.
+- **`core`**: Always on: guide, tasks, records, sources, schema, recipes. `guide`, `workflows`, `details`, `tasks`, `task`, `task_new`, `task_checkout`, `task_step`, `task_add`, `task_verify`, `task_release`, `task_close`, `contexts`, `context_checkout`, `create_archive`, `describe_schema`, `properties`, `check`, `check_records`, `save`, `preview`, `get_records`, `amend_records`, `find_entities`, `explain_entity`, `read_file`, `source_profile`, `source_outline`, `source_names`, `read_source`, `sources`, `cite`, `labelling_guidelines`, `vocabularies`, `keys`, `collections`, `collection_create`, `recipe`, `paths`, `toolsets`, `toolset_enable`, `toolset_disable`, `tool_on`, `tool_off`, `extra_fields`, `field_assign`.
 - **`enrich`**: Sources fetched and swapped, suggestions, images, stubs, open questions. `fetch_source`, `drop_source`, `swap_source`, `source_report`, `wikipedia_footnotes`, `read_page`, `probe`, `suggestions`, `apply_suggestion`, `dismiss_suggestion`, `suggestions_reset`, `enrichers`, `enrichments`, `enrichment_delete`, `enrichment_hide`, `wikidata_purge`, `link_image`, `link_images`, `stubs`, `graduate_stub`, `pin_upstream`, `open_questions`, `answer`, `decisions`, `open_ends`, `neighbors`, `cast`.
 - **`wikidata`**: Link entries to Wikidata as questions for the person; a confirmed match brings its picture. `wikidata_questions`, `wikidata_answer`, `wikidata_status`.
+- **`checks`**: Read-only reviewers for a second look at saved records; they never build or write. `check_values`, `check_rules`, `check_graph`, `source_page_image`.
 - **`geo`**: Places, features, GeoLinks, layers. `geo_aspects`, `geo_contexts`, `geo_enable`, `geo_locate`, `geo_measure`, `geo_query`, `geo_register_status`, `geo_report`, `geo_resolve`, `geo_summarize`, `draw_feature`, `move_feature`, `delete_feature`, `transform_geometry`, `edit_geolink`, `edit_siting`, `layer_add`, `layer_list`, `layer_remove`, `set_primary`.
 - **`shape`**: Labels, collections, views, article sections, the wiki. `label`, `tags`, `badges`, `positions`, `set_positions`, `tree`, `set_collection`, `set_collection_views`, `set_collection_group`, `collection_merge`, `collection_rename`, `collection_delete`, `move_records`, `view_check`, `view_config`, `symbology`, `set_symbology`, `article_sections`, `set_article_section`, `remove_article_section`, `move_article_section`, `site`, `wiki_serve`, `wiki_stop`, `publish`, `wiki_readiness`.
 - **`admin`**: Settings, scope, packages, export, history, build. `archive_settings`, `scope`, `set_scope`, `packages`, `package_install`, `pack`, `upgrade`, `export`, `history_log`, `history_diff`, `history_restore`, `universe_build`, `save_changes`.
@@ -142,6 +143,15 @@ Quote only text you read through these tools.
 | `wikidata_questions` | Link the archive to Wikidata | Entries with no key, what the archive says, Wikidata's candidates; put them to the person |
 | `wikidata_answer` | The person picked a candidate, or none | Pins the key, then imports the item's picture with its licence; `none` stops asking; preview, then `confirm` |
 | `wikidata_status` | How far linking has got | Matched, answered none, open |
+
+### Second look (`checks` set)
+
+| Tool | Use when | How |
+|---|---|---|
+| `check_values` | A batch of records is saved and you want its dates, amounts, names and basis words checked | `records` (omit for all); findings with the sentence and a fix to read; `stale: true` means run `universe_build` first |
+| `check_rules` | The same batch, against the archive's rule files | Kinship direction, Representation capacity, allowed ends, vocabularies; a fix is a suggestion |
+| `check_graph` | You want to see who is central and where a tie may be missing | A shape alone is no finding; each finding names `entities`; pass the `snapshot` back as `since` for what changed |
+| `source_page_image` | A finding stays unclear after reading the sentences | One page of a kept PDF as a picture (`page` from 1, `dpi` 72 to 200); never a quote |
 
 ## 7. Label
 

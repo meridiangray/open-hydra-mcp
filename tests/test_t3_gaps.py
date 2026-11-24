@@ -26,7 +26,7 @@ def stored(root):
 
 
 def test_amend_takes_the_collections_own_prefix_and_refuses_another(archive):
-    from hydra import collectionops
+    from hydra.records import collectionops
     pre = collectionops.prefix_of(archive, "a")
     ann = next(r for r in stored(archive) if r["properties"].get("name") == ["Ann Lee"])
     rec = {"id": f"{pre}:{ann['id']}", "schema": "Person", "properties": {"name": ["Ann Lee"], "gender": ["female"]}}
@@ -68,7 +68,7 @@ def test_answer_keeps_its_evidence_and_decisions_show_it(archive):
 
 
 def test_step_refusal_do_names_the_reason(archive, monkeypatch):
-    from hydra import tasks
+    from hydra.agents import tasks
     def refuse(*a, **k):
         raise tasks.TaskError("step A1 is checked by x y, which still finds: w (2). Fix them")
     monkeypatch.setattr(tasks, "step_task", refuse)

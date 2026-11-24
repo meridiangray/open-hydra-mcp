@@ -24,17 +24,25 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hydra import layout
+from hydra.records import scope as sc, entities, stubs as st
+from hydra.schema import loader as schema
+from hydra.archive import layout
 
-from hydra_mcp import core
+from hydra.api.stubs import graduate  # noqa: F401  (moved: plans/imports.md I2c)
+from hydra_mcp import core, agent, workflows
 from hydra_mcp.core import IngestError
+import html
+import signal
+from hydra.geo import query as gquery
+from hydra.review import stubs as rstubs
+from hydra.universe import layer, build as ubuild, review
+import yaml
 
 STATE = Path(tempfile.gettempdir()) / "hydra-mcp-wiki"       # which server this tool started on which port
 ENTRIES = re.compile(r"([\d,]+) entries")
 
 
 def _universe(root: Path):
-    from hydra.universe import layer
     if not layer.is_universe(root):
         raise IngestError("this archive has no universe layer: `hydra-ctl universe init` adds one")
 
@@ -43,7 +51,6 @@ def _universe(root: Path):
 
 def universe_build(root: Path) -> dict:
     """Build the universe: which records are one entity, each one's H, and the pages."""
-    from hydra.universe import build as ubuild
     _universe(root)
     r = ubuild.build(root)
     c = r["counts"]
@@ -55,7 +62,6 @@ def universe_build(root: Path) -> dict:
 
 
 def _built_pages(root: Path) -> list[dict]:
-    from hydra.universe import layer
     return layer.read_parsed(root, "pages.jsonl", missing=[])
 
 
@@ -64,7 +70,6 @@ def publish(root: Path, hs: list[str] | None = None, collections: list[str] | No
     """Preview (default) or publish computed Hs: `hs` by H, body or record id; or every computed
     H whose records all come from `collections` (an entity drawing on any other collection is
     left for its owner to decide)."""
-    from hydra.universe import build as ubuild, layer, review
     _universe(root)
     built = {r["body"]: r for r in layer.read_parsed(root, "canon.jsonl", missing=[])}
     if not built:
@@ -96,7 +101,6 @@ def publish(root: Path, hs: list[str] | None = None, collections: list[str] | No
                                "person, then call again with confirm=true"}
     n = review.publish(root, todo, by=core.AGENT)
     ubuild.build(root)
-    from hydra_mcp import agent, workflows
     workflows.hook_log(root, f"publish {n} H(s)")
     return {**out, "published": n, "snapshot": agent._snap(root, f"publish {n} Hs")}
 
@@ -108,24 +112,22 @@ _WIKI: dict = {}
 
 def _wiki(root: Path):
     """The wiki of the last universe build, loaded once per build."""
-    from hydra.universe import build as ubuild
-    from hydra.wiki import site
     if not ubuild.pages_current(root):
         ubuild.build(root)
     f = root / layout.UNIVERSE_PARSED / "pages.jsonl"
     key = (str(root), f.stat().st_mtime_ns)
     if key not in _WIKI:
+        from hydra.wiki import site  # lazy: startup
         _WIKI.clear()
         _WIKI[key] = site.Wiki(root)
     return _WIKI[key]
 
 
 def _text(fragment: str) -> str:
-    import html as h
     t = re.sub(r"<sup>\s*<a href='#cite-(\d+)'>\[\d+\]</a>\s*</sup>", r"[\1]", fragment)
     t = re.sub(r"</(p|tr|li|div|caption|h\d)>|<br\s*/?>", "\n", t)
     t = re.sub(r"<(td|th)[^>]*>", " | ", t)
-    t = h.unescape(re.sub(r"<[^>]+>", "", t))
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
     lines = [re.sub(r"[ \t]+", " ", x).strip(" |") for x in t.splitlines()]
     return "\n".join(x for x in lines if x)
 
@@ -154,7 +156,6 @@ def _link_places(w, page: dict, rows: list[dict]) -> list[dict]:
     """Each infobox row with the entries its values name: `links` [{text, h, title}]. A value that resolved to an entry
     links to it; a place-valued field (birthPlace, address, location, registrationPort) holding the name of a Place
     entry links to that Place's page."""
-    from hydra.geo import query as gquery
     places: dict[str, str] = {}
     for b, q in w.pages.items():
         if q.get("schema") == "Place" and b in w.listed:
@@ -181,13 +182,13 @@ def _link_places(w, page: dict, rows: list[dict]) -> list[dict]:
 def read_page(root: Path, entity: str) -> dict:
     """An entry's page as a reader sees it: title, id, scope, the infobox rows, the lead, each section's
     text in order, and its footnotes [n] resolved to the record, collection, source and quote behind them."""
-    from hydra.wiki import site
     _universe(root)
     w = _wiki(root)
     body = core.resolve_entity(root, entity).body          # one page, strictly: a shared title is refused with its Hs
     if body not in w.pages:
         raise IngestError(f"'{entity}' has no page in the wiki's last build: universe_build, then call again")
     p = w.pages[body]
+    from hydra.wiki import site  # lazy: startup
     page = w.render_page(site.Links(static=False), body)
     box = re.search(r"<table class=infobox>(.*?)</table>", page, re.S)
     rows = [{"label": _text(th), "value": _text(td)}
@@ -209,7 +210,6 @@ def read_page(root: Path, entity: str) -> dict:
               **({"quote": c["quote"]} if c.get("quote") else {})} for c in p["citations"]]
     geo_info = None
     if (root / layout.GEO_PARSED / "located.jsonl").is_file():
-        from hydra.geo import query as gquery
         gm = gquery.load(root)
         if body in gm.rows:
             geo_info = gquery.locate(root, body)
@@ -224,7 +224,6 @@ def scope(root: Path, entity: str | None = None) -> dict:
     """What the archive is about (scope.yaml) as the last build computed it: how many entries are
     in scope, the context ones, and for `entity` (an H, key, record id or a title only one entry
     has; a shared title is refused with its Hs) whether it is in scope and why."""
-    from hydra import scope as sc
     _universe(root)
     pages = _built_pages(root)
     conf = sc.load(root)
@@ -232,8 +231,6 @@ def scope(root: Path, entity: str | None = None) -> dict:
     out = {"file": conf["file"], "seeds": conf["seeds"], "include": conf["include"], "exclude": conf["exclude"],
            "in_scope": len(pages) - len(ctx), "context": len(ctx), "context_entries": ctx}
     if entity:
-        from hydra import entities
-        from hydra_mcp import workflows
         try:
             hit = core.resolve_entity(root, entity)        # one entry, strictly: a shared title is refused with its Hs
         except IngestError as e:
@@ -250,9 +247,6 @@ def set_scope(root: Path, include: list[str] | None = None, exclude: list[str] |
     """Preview (default) or write the archive's scope.yaml: add to `include` / `exclude` (Hs, keys,
     record ids, titles, `collection:<name>`), or set the seed collections. The preview says which
     entries would come into scope and which would leave it."""
-    import yaml
-    from hydra import scope as sc
-    from hydra.universe import build as ubuild
     _universe(root)
     pages = _built_pages(root)
     conf = sc.load(root)
@@ -260,7 +254,6 @@ def set_scope(root: Path, include: list[str] | None = None, exclude: list[str] |
            "exclude": list(dict.fromkeys(conf["exclude"] + list(exclude or [])))}
     if seeds is not None:
         new["seeds"] = {**conf["seeds"], "collections": list(seeds)}
-    from hydra import schema
     schema.ensure()
     ends = {s: (d["edge"]["source"], d["edge"]["target"]) for s, d in schema.SCHEMA.items() if d.get("edge")}
     before, after = sc.compute(pages, conf, ends), sc.compute(pages, new, ends)
@@ -284,7 +277,6 @@ def set_scope(root: Path, include: list[str] | None = None, exclude: list[str] |
     f.write_text("# .hydra/rules/scope.yaml — what this archive is about (see hydra's template for every key)\n"
                  + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
     ubuild.build(root)
-    from hydra_mcp import agent, workflows
     workflows.hook_log(root, f"set_scope {scope}")
     return {**out, "written": str(f), "snapshot": agent._snap(root, "scope")}
 
@@ -293,33 +285,9 @@ def set_scope(root: Path, include: list[str] | None = None, exclude: list[str] |
 
 def stubs(root: Path) -> dict:
     """Names that links hold but no record has (red links), and those already graduated."""
-    from hydra import stubs as st
-    from hydra.cli import stubs as sc
-    return {"stubs": st.found(root), "graduated": sc.graduated(root),
+    return {"stubs": st.found(root), "graduated": rstubs.graduated(root),
             "next": "write a record for a stub (then its links find it), or graduate it into a bare entity"}
 
-
-def graduate(root: Path, name: str, as_schema: str = "", confirm: bool = False) -> dict:
-    """Preview (default) or graduate a stub: every link naming it points at one entity."""
-    from hydra import stubs as st
-    from hydra.cli import stubs as sc
-    e = next((x for x in st.found(root) if x["slug"] == st.slug(name)), None)
-    if e is None:
-        raise IngestError(f"no link names '{name}' without a record (`stubs` lists the names)")
-    out = {"name": e["name"], "links": e["links"], "fields": e["fields"], "as": as_schema or e["fits"]}
-    if not out["as"]:
-        raise IngestError(f"the fields naming '{name}' fit no one schema; give as_schema")
-    if not confirm:
-        return {**out, "next": "a graduated stub is an entity with a name and nothing else; a record with its "
-                               "facts is better when the source has them. Confirm with the person, then confirm=true"}
-    said = []
-    try:
-        sc.graduate(root, name, as_schema, False, said.append)
-    except SystemExit as x:
-        raise IngestError(str(x).removeprefix("hydra: ")) from None
-    from hydra_mcp import agent, workflows
-    workflows.hook_log(root, f"graduate {name} ({as_schema})")
-    return {**out, "graduated": True, "build": said[-1] if said else None, "snapshot": agent._snap(root, f"graduate {name}")}
 
 
 # ---- the wiki ------------------------------------------------------------------------
@@ -347,7 +315,6 @@ def _kill(pid: int) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
     else:
-        import signal
         os.kill(pid, signal.SIGTERM)
 
 
@@ -395,7 +362,6 @@ def wiki_serve(root: Path, port: int = 8080, theme: str | None = None, replace_o
     stop the server this tool started there, start a new one, and check that it serves as many
     entries as the build made pages. `replace_other` also stops a server this tool did not start
     on that port (ask the person first: it may be theirs)."""
-    from hydra.universe import build as ubuild
     _universe(root)
     rebuilt = False
     if not ubuild.pages_current(root):

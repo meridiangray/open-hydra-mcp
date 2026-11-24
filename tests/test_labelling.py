@@ -31,7 +31,7 @@ def test_a_judgement_previews_then_writes_only_on_confirm(archive):
     assert pre["ok"] and pre["written"] == 0 and pre["next"] and not pre["needs_source"]
     assert [e["entry"] for e in pre["entries"]] == ["Consulate New York", "Embassy Washington"]
     assert pre["entries"][0]["labels"][0]["would"].startswith("Diplomatic mission: is one")
-    from hydra import archetypes
+    from hydra.shape import archetypes
     assert not archetypes.decisions(archive)
     done = labelling.label(archive, ["Consulate New York", "Embassy Washington"], "tag:diplomatic-mission", confirm=True)
     assert done["written"] == 1 and len(archetypes.decisions(archive)) == 2

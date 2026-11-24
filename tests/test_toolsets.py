@@ -8,14 +8,15 @@ import yaml
 from pathlib import Path
 
 import hydra
-from hydra import tasks as htasks, writelock
+from hydra.agents import tasks as htasks
+from hydra.archive import writelock
 from hydra_mcp import core, server, toolsets
 
 CORE = (
     "guide workflows details tasks task task_new task_checkout task_step task_add task_verify task_release task_close "
     "contexts context_checkout create_archive describe_schema properties check check_records save preview get_records "
     "amend_records find_entities explain_entity read_file source_profile source_outline source_names read_source sources cite labelling_guidelines vocabularies "
-    "keys collections collection_create recipe paths toolsets toolset_enable extra_fields field_assign").split()
+    "keys collections collection_create recipe paths toolsets toolset_enable toolset_disable tool_on tool_off extra_fields field_assign").split()
 WORKFLOW_DIR = Path(hydra.__file__).parent / "workflows"
 
 
@@ -46,6 +47,17 @@ def test_every_tool_is_in_exactly_one_set():
     assert registered == set(toolsets.TOOL_SET)
     flat = [t for ts in toolsets.TOOLSETS.values() for t in ts]
     assert len(flat) == len(set(flat)) == len(registered)
+
+
+def test_each_tool_is_defined_in_the_module_of_its_set():
+    st = toolsets._state(server.mcp)
+    wrong = {n: t.fn.__module__ for n, t in st.all.items() if t.fn.__module__ != f"hydra_mcp.tools.{toolsets.TOOL_SET[n]}"}
+    assert not wrong, f"move these to hydra_mcp/tools/<their set>.py: {wrong}"
+
+
+def test_every_tool_function_is_still_a_name_of_server():
+    for t in toolsets._state(server.mcp).all.values():
+        assert getattr(server, t.fn.__name__) is t.fn, t.name
 
 
 def test_core_holds_the_listed_tools():
@@ -107,7 +119,6 @@ def test_enabled_tools_pass_through_the_write_lock_and_the_call_log(arch):
 
     def other():
         out["r"] = call("delete_feature", {"feature": "x", "confirm": True, "archive": str(arch)})
-    from hydra_mcp import workflows as wf
     old = writelock.WAIT
     writelock.WAIT = 0.2
     try:

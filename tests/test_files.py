@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from hydra import layout
+from hydra.archive import layout
 from hydra_mcp import core, mint, server
 
 TEXT = "Dana Hale, administrator of the Port Authority, said her deputy Rob Kerr would lead the inquiry."

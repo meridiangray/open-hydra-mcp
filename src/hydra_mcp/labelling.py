@@ -11,22 +11,22 @@ kin:mother@<H> (a Family record, the kinship word from the entry's side), drop:e
 entry first; writes with `confirm`. A label that states a fact (org, a country, a post held, own, evt, kin) needs
 `source`: any kept source of the archive (`sources` lists them, the ones the entry's records cite first); a judgement (place, ladder post, tag, removal) needs
 none. Every claim written carries its Wikidata property code in `_meta.wd`; a preview row lists it as `wd`, or
-`no_standard_code` when the field has none.
+`no_standard_code` when the field has none. The tool itself is in `tools/shape.py`.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from hydra_mcp import core
+from hydra_mcp import workflows
 from hydra_mcp.core import AGENT, IngestError
+from hydra.enrich import labels
+from hydra.universe import build as ubuild
 
 NEXT = "confirm with the person, then call again with confirm=true"
 
 
 def label(root: Path, entities: list[str], tokens: str | list[str], confirm: bool = False,
           source: str | None = None) -> dict:
-    from hydra import labels
-    from hydra.universe import build as ubuild
     if isinstance(tokens, list):
         tokens = " ".join(str(t) for t in tokens)
     if isinstance(entities, str):
@@ -53,16 +53,7 @@ def label(root: Path, entities: list[str], tokens: str | list[str], confirm: boo
         raise IngestError(str(e)) from None
     except SystemExit as e:
         raise IngestError(str(e.code).removeprefix("hydra: ")) from None
-    from hydra_mcp import workflows
     workflows.hook_log(root, f"label {tokens} on {len(entities)} entry(ies)")
     if source:
         workflows.hook_source(root, source)
     return {**out, "written": len(done["written"]), "did": done["written"], **({"snapshot": done["snapshot"]} if done.get("snapshot") else {})}
-
-
-def register(mcp, run) -> None:
-    @mcp.tool(name="label")
-    def label_tool(entities: list[str], tokens: str, confirm: bool = False, source: str | None = None,
-                   archive: str | None = None) -> dict:
-        """Attach labels to entries (by H, key, record id or title), the way the wiki's Labelling page does. `tokens` is one command line of `kind:value` words (place, org, post, tag, own, evt, kin, drop). Previews each entry's labels first, each with its Wikidata property code (`wd`) or `no_standard_code`. A fact (org, country, a post held, own, evt, kin) needs `source`, the id of a kept source; judgements need none. Writes only with confirm=true, and only when every label of every entry is ok; confirm only with the person's agreement. More: guide("labelling", "label")"""
-        return run(lambda: label(core.open_archive(archive), entities, tokens, confirm, source))

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from hydra import tasks as htasks
+from hydra.agents import tasks as htasks
 from hydra_mcp import calllog, core, server
 
 

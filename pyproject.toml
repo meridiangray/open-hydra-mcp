@@ -29,3 +29,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+# lint only, no reformat yet (hydra-docs plans/imports.md §6). Baseline 2026-11-23: 9 findings (F401 8, F841 1)
+select = ["F", "E9", "W605"]

@@ -1,17 +1,19 @@
-"""packages.py — packages of geo layers, icons, archetypes and themes, for the agent: thin over hydra.packages
+"""packages.py — packages of geo layers, icons, archetypes and themes, for the agent: thin over hydra.machine.packages
 (the same functions `hydra-ctl package` and the Bazaar page run). Preview unless `confirm`."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from hydra_mcp.core import AGENT, IngestError
+from hydra.machine import packages as P
+from hydra.archive import history
+from hydra.wiki.look import bazaar
 
 NEXT = "confirm with the person, then call again with confirm=true"
 
 
 def packages(root: Path) -> dict:
     """The archive's lock (what it uses), the machine's store (shared bytes), the registries and what they offer."""
-    from hydra import packages as P
     try:
         lock = P.read_lock(root)
         offer = P.state(root)
@@ -26,9 +28,6 @@ def packages(root: Path) -> dict:
 def package_install(root: Path, name: str, confirm: bool = False, scope: str = "machine") -> dict:
     """Get `name` from the registries for this archive: bytes into the shared store, a line in its lock (preview:
     licence, what it provides, where it writes)."""
-    from hydra import history
-    from hydra import packages as P
-    from hydra.wiki import bazaar
     try:
         out = bazaar.preview(root, "install", name, scope)
         if out["needs"]:

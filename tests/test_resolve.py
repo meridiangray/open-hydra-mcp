@@ -1,4 +1,4 @@
-"""Every tool that takes an `entity` names ONE entry through `hydra.entities.resolve`: an H, a bare body, a key, a
+"""Every tool that takes an `entity` names ONE entry through `hydra.records.entities.resolve`: an H, a bare body, a key, a
 record id, or a title only one entry has. A shared title, a part of a title and a near miss are refused (the
 candidates listed), never answered with the first or the closest hit. A Suggestions cast writes the record ids of
 the two entries picked, so the link lands on the one the person chose."""
@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from hydra import entities, graphquery
+from hydra.structure import graphquery
+from hydra.records import entities
 from hydra.cli import init as hinit
 from hydra.cli import main as cli
 from hydra_mcp import agent, article, core, pipeline, suggestions

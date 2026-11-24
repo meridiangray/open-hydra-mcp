@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hydra_mcp import files
+from hydra_mcp.core import IngestError
 
 PART = 20_000                 # characters a part aims at (~6k tokens): well under a tool reply's cap
 MIN_SHARE = 0.4               # a heading ends a part once the part holds this share of PART
@@ -234,7 +235,6 @@ def part_text(path: Path, n: int) -> tuple[dict, str, int]:
     prof = profile(path)
     parts = prof["parts"]
     if not 1 <= int(n) <= len(parts):
-        from hydra_mcp.core import IngestError
         raise IngestError(f"{path.name} has {len(parts)} part{'s' if len(parts) != 1 else ''}: ask for part 1 to {len(parts)}")
     p = parts[int(n) - 1]
     text = files.read(path)["text"]

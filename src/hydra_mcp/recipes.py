@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from hydra_mcp import core
+from hydra.archive import resources
 
 TIMEOUT, MAX_TIMEOUT = 120, 600
 
@@ -223,7 +224,6 @@ def run(name: str | None, args: dict | None, archive: str | None = None, timeout
         if check not in AUDIT_CHECKS:
             raise core.IngestError(f"give `check` in args, one of: {', '.join(AUDIT_CHECKS)}")
         root = core.open_archive(archive)
-        from hydra import resources
         files = resources.record_files(root)[0]
         if not files:
             raise core.IngestError(f"{root} has no collections yet")

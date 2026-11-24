@@ -6,7 +6,7 @@ import json
 import pytest
 
 from hydra.cli import main as cli
-from hydra import layout
+from hydra.archive import layout
 from hydra_mcp import core, server
 
 CATALOGUE = {"fetched": "2026-11-21T00:00:00+00:00", "source": "sparql", "count": 3, "properties": {

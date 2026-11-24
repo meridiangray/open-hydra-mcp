@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from hydra import layout, resources
+from hydra.archive import layout, resources
 from hydra_mcp import core, mint, server
 
 RECORDS = [{"schema": "Person", "properties": {"name": "Dana Hale"}},

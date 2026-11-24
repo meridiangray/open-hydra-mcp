@@ -11,14 +11,16 @@
     wikidata_status      how many entries are matched, still to ask, or answered "none".
 
 It drives the same engine as the wiki's Suggestions drawer (hydra/suggest.py): one probe cache, one ledger, so a
-person sees in the wiki exactly what an agent did here.
+person sees in the wiki exactly what an agent did here. The tools themselves are in `tools/wikidata.py`.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from hydra_mcp import core
+from hydra_mcp import core, workflows, suggestions
 from hydra_mcp.core import IngestError
+from hydra.enrich import suggest
+from hydra.records import entities
 
 MATCH, PORTRAIT = "wikidata-find", "commons"
 NEXT = "put each question to the person (an entry, what the archive says, the candidates); call wikidata_answer with their pick"
@@ -27,7 +29,6 @@ FACTS = ("birthDate", "deathDate", "incorporationDate", "dissolutionDate", "date
 
 
 def _s(fn):
-    from hydra import suggest
     try:
         return fn(suggest)
     except SystemExit as e:
@@ -36,7 +37,6 @@ def _s(fn):
 
 def _pages_current(root: Path) -> None:
     """The universe pages brought up to date first, as every reader of them does (`entities.catalog`)."""
-    from hydra import entities
     entities.catalog(root)
 
 
@@ -105,7 +105,6 @@ def answer(root: Path, entity: str, qid: str, confirm: bool = False) -> dict:
             return {"entity": entity, "would": "dismiss the Wikidata match: this entry is not asked again",
                     "next": "confirm with the person, then call again with confirm=true"}
         out = _s(lambda m: m.dismiss(root, body, MATCH))
-        from hydra_mcp import workflows
         workflows.hook_log(root, f"wikidata: no match for {entity}")
         return {"entity": entity, "dismissed": True, "result": out}
     got = _s(lambda m: m._read_probe(root, MATCH, body))
@@ -125,7 +124,6 @@ def answer(root: Path, entity: str, qid: str, confirm: bool = False) -> dict:
                 "would": [f"pin wikidata:{qid} to {plan['args']['collection']}/{plan['args']['record']}",
                           "then import the item's picture, if Wikidata names one, with its licence and artist"],
                 "next": "confirm with the person, then call again with confirm=true"}
-    from hydra_mcp import suggestions
     pinned = _s(lambda m: m.perform(root, body, MATCH, plan["tool"], plan["args"],
                                     lambda: suggestions._run_tool(root, plan["tool"], plan["args"]), by="mcp"))
     _pages_current(root)                                   # the key on the page before Portrait asks for it
@@ -134,14 +132,12 @@ def answer(root: Path, entity: str, qid: str, confirm: bool = False) -> dict:
     except Exception:
         pass
     out = {"entity": entity, "matched": qid, "pinned": pinned, "picture": _portrait(root, body)}
-    from hydra_mcp import workflows
     workflows.hook_log(root, f"wikidata: {entity} is {qid}")
     return out
 
 
 def _portrait(root: Path, body: str) -> dict:
     """After a confirmed match: the item's picture (P18) imported with its licence, when there is one. Never shown."""
-    from hydra_mcp import suggestions
     try:
         found = _s(lambda m: [s for s in m.suggestions(root, body) if s["id"] == PORTRAIT])
         if not found:
@@ -173,27 +169,3 @@ def status(root: Path) -> dict:
     out = _s(go)
     out["open"] = len(_open(root))
     return out
-
-
-def register(mcp, run) -> None:
-    @mcp.tool(name="wikidata_questions")
-    def wikidata_questions_tool(schema: str | None = None, limit: int = 5, offset: int = 0,
-                                archive: str | None = None) -> dict:
-        """The Wikidata questions for this archive: each entry with no Wikidata key yet (a Person, an Organization…),
-        what the archive itself says about it (dates, country, posts held) and Wikidata's candidates (Q-id, label,
-        description). Asks Wikidata once per entry and keeps the answer; writes no records. Put each question to the
-        person; their answer goes to `wikidata_answer`. `schema` narrows to one type; page with `offset`."""
-        return run(lambda: questions(core.open_archive(archive), schema, limit, offset))
-
-    @mcp.tool(name="wikidata_answer")
-    def wikidata_answer_tool(entity: str, qid: str, confirm: bool = False, archive: str | None = None) -> dict:
-        """The person's answer to one Wikidata question: `qid` is the candidate they confirmed, or `none`. A match pins
-        the key to the entry's record and then imports the item's picture when Wikidata names one, with its licence
-        and artist (no image is shown here). `none` stops the entry being asked again. A name is never proof: confirm
-        only what the person confirmed. Without `confirm` it shows what it would do."""
-        return run(lambda: answer(core.open_archive(archive), entity, qid, confirm))
-
-    @mcp.tool(name="wikidata_status")
-    def wikidata_status_tool(archive: str | None = None) -> dict:
-        """How far the archive is linked to Wikidata: its entries, how many are matched, answered "none", or open."""
-        return run(lambda: status(core.open_archive(archive)))

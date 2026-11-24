@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from hydra import articles, history, layout
+from hydra.records import articles
+from hydra.archive import history, layout
 from hydra.cli import main as cli
 from hydra_mcp import agent, article, core, upkeep
 
@@ -25,7 +26,7 @@ def archive(tmp_path):
 
 def _one(root, title):
     """The H of the first of the namesakes: a shared title is refused, so a tool is given an H."""
-    from hydra import entities
+    from hydra.records import entities
     with pytest.raises(core.IngestError, match="names 2 entries"):
         article.body_of(root, title)
     return sorted(c["h"] for c in entities.catalog(root).search(title) if c["title"] == title)[0]

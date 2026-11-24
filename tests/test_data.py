@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from hydra import collections_io, layout
+from hydra.archive import collections_io, layout
 from hydra.cli import main as cli
 from hydra_mcp import core, data, server
 
@@ -68,7 +68,7 @@ def test_collection_tools_preview_confirm_and_refuse(archive):
 
 
 def test_neighbors_paths_and_edge_fields(archive):
-    from hydra import graphquery as g
+    from hydra.structure import graphquery as g
     ann = g.neighbors(archive, "Ann Lee")
     assert [n["title"] for n in ann["nodes"]] == ["Ann Lee", "Acme Corp"]
     e = ann["edges"][0]
@@ -90,7 +90,7 @@ def test_neighbors_paths_and_edge_fields(archive):
 
 
 def test_tags_report_fit_reasons_and_decision(archive):
-    from hydra import graphquery as g
+    from hydra.structure import graphquery as g
     t = g.tags(archive, "Embassy of Utopia in Paris")
     row = next(r for r in t["tags"] if r["id"] == "diplomatic-mission")
     assert row["score"] > 0 and any("name says" in s for s in row["shows"]) and row["decision"] == "undecided"

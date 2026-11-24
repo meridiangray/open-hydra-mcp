@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hydra import packages as P
+from hydra.machine import packages as P
 from hydra.cli import main as cli
 from hydra_mcp import core, packages as pk
 
@@ -16,7 +16,7 @@ def setup(tmp_path, monkeypatch):
     root = tmp_path / "case"
     cli(["init", str(root), "--name", "case", "--prefix", "c"])
     spec = importlib.util.spec_from_file_location(
-        "build_packages", Path(P.__file__).parents[2] / "scripts" / "build_packages.py")
+        "build_packages", Path(P.__file__).parents[3] / "scripts" / "build_packages.py")
     bp = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bp)
     reg = tmp_path / "registry"

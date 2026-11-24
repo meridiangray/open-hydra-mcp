@@ -174,8 +174,8 @@ def test_failures_reach_the_client_as_error_why_do(archive):
 
 
 def test_failure_payload_maps_the_exception_types():
-    from hydra import tasks
-    from hydra.writelock import Busy
+    from hydra.agents import tasks
+    from hydra.archive.writelock import Busy
     cases = [(core.NoArchive("x"), "no archive"), (tasks.TaskError("t"), None), (SystemExit("hydra: bad"), "hydra refused"),
              (FileNotFoundError("f"), "not found"), (RuntimeError("boom"), "failed"), (ValueError("v"), "refused")]
     for exc, error in cases:

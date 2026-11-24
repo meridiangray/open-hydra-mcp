@@ -1,4 +1,4 @@
-"""Keep the tool tables in the docs equal to the tools server.py registers.
+"""Keep the tool tables in the docs equal to the tools the server registers (hydra_mcp/tools/<set>.py).
 
 Imports the server and lists its registered tools, builds a Markdown table of
 every one, and rewrites the text between
@@ -21,7 +21,7 @@ START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 
 def tools() -> list[tuple[str, list[str], str]]:
-    """Every registered tool (server.py and the modules that register onto it), in name order."""
+    """Every registered tool (the modules of hydra_mcp/tools, imported by server.py), in name order."""
     import asyncio
     sys.path.insert(0, str(ROOT / "src"))
     from hydra_mcp import server

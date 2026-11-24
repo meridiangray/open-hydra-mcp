@@ -1,5 +1,4 @@
 """recipe(): the Archive Workflow's read-only recipes, run by name with their JSON back (gap G17)."""
-import json
 import shutil
 import sys
 

@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from hydra import __version__
+from hydra.build import freshness
 
 INTERVAL = 3.0                                    # seconds between two looks at the disk
 
@@ -18,31 +21,40 @@ _last = [0.0, None]                               # when the last check ran, and
 
 
 def _files() -> list[Path]:
-    from hydra import freshness
     mine = sorted(p for p in Path(__file__).resolve().parent.glob("**/*.py") if "__pycache__" not in p.parts)
     return [*freshness._code_files(), *mine]
 
 
+WORKERS = 16                                      # files are read in parallel: one by one is slow on a mounted drive
+
+
+def _stat(f) -> tuple:
+    try:
+        st = os.stat(f)
+        return (str(f), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return (str(f), None, None)
+
+
+def _read(f) -> bytes | None:
+    try:
+        return f.read_bytes()
+    except OSError:
+        return None
+
+
 def _stamps(files) -> list:
-    out = []
-    for f in files:
-        try:
-            st = os.stat(f)
-            out.append((str(f), st.st_size, st.st_mtime_ns))
-        except OSError:
-            out.append((str(f), None, None))
-    return out
+    with ThreadPoolExecutor(WORKERS) as pool:
+        return list(pool.map(_stat, files))
 
 
 def _hash(files) -> str:
-    from hydra import __version__
     h = hashlib.blake2b(digest_size=12)
     h.update(str(__version__).encode() + b"\0")
-    for f in files:
-        try:
-            h.update(str(f.name).encode() + b"\0" + f.read_bytes() + b"\0")
-        except OSError:
-            pass
+    with ThreadPoolExecutor(WORKERS) as pool:
+        for f, data in zip(files, pool.map(_read, files)):          # map keeps the order, so the id is stable
+            if data is not None:
+                h.update(str(f.name).encode() + b"\0" + data + b"\0")
     return h.hexdigest()
 
 
